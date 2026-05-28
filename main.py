@@ -273,7 +273,11 @@ async def main():
     server_thread.start()
 
     # ── Start Workers ────────────────────────────────────────────────
-    hotkey_listener.start()
+    import sys as _sys
+    if _sys.platform == "darwin":
+        print("[Hotkey] Disabled on macOS (keyboard library lacks support). Use the dashboard.")
+    else:
+        hotkey_listener.start()
 
     capture_task = asyncio.create_task(capture_worker.run())
     analysis_task = asyncio.create_task(analysis_worker.run())
@@ -317,7 +321,9 @@ async def main():
     capture_worker.stop()
     analysis_worker.stop()
     audio_worker.force_stop()
-    hotkey_listener.stop()
+    import sys as _sys
+    if _sys.platform != "darwin":
+        hotkey_listener.stop()
     if agent_scheduler:
         agent_scheduler.stop()
     server.should_exit = True
