@@ -24,7 +24,7 @@ async def search_activities(
 
     conn = db._get_conn()
 
-    where_clauses = ["analyzed = 1", "embedding IS NOT NULL"]
+    where_clauses = ["status = 'ok'", "embedding IS NOT NULL"]
     params = []
 
     if category:
@@ -100,7 +100,7 @@ async def search_activities(
                    a.details, a.screenshot_path, a.bookmarked, a.mood, fts.rank
             FROM activities_fts fts
             JOIN activities a ON a.id = fts.rowid
-            WHERE activities_fts MATCH ?{fts_date_where}
+            WHERE activities_fts MATCH ? AND a.status = 'ok'{fts_date_where}
             ORDER BY rank
             LIMIT ?
             """,

@@ -6,6 +6,7 @@ from collections import Counter
 from datetime import datetime as dt
 
 from fastapi import APIRouter, Query
+from fastapi.responses import JSONResponse
 
 from screenmind.config import settings
 from screenmind.api.dependencies import db
@@ -27,7 +28,7 @@ def _compute_day_metrics(activities: list) -> dict:
     count × capture_interval which overcounts rapid-fire frames and
     undercounts long static work sessions.
     """
-    analyzed = [a for a in activities if a.get("analyzed")]
+    analyzed = [a for a in activities if a.get("status") == "ok"]
     if not analyzed:
         return {"productive_hours": 0.0, "category_breakdown": {}, "top_repos": []}
 
@@ -95,13 +96,33 @@ async def generate_summary(
     if not activities:
         return {"date": target, "summary": {"summary": "No activities recorded on this date."}}
 
-    # Build rich context
+    # Snapshot real count before any filtering/trimming — this is "how much
+    # happened today", not "how much fit in the prompt".
+    real_count = sum(1 for a in activities if a.get("status") == "ok")
+
+    if real_count == 0:
+        return {"date": target, "summary": {"summary": "No analyzed activities on this date."}}
+
+    # Adapt output size to context window — don't request 2048 on a 4096 window
+    max_output = min(2048, settings.context_window // 3)
+
+    # Budget: (context_window - output - safety margin) * ~3.0 chars/token
+    # Using 3.0 (conservative) rather than 3.5 to account for CJK/code/OCR text.
+    # The 150-entry cap is the real safety net for pathological inputs.
+    prompt_template_chars = 350  # The rules/wrapper text around {acts_text}
+    available_tokens = settings.context_window - max_output - 300
+    char_budget = int(available_tokens * 3.0) - prompt_template_chars
+
+    # Build rich context — only include real analyses (status='ok')
     MAX_RICH = 20
+    MAX_ENTRIES = 150  # Secondary guard for pathological inputs
     act_entries = []
     rich_count = 0
     for a in activities:
-        if not a.get("analyzed"):
+        if a.get("status") != "ok":
             continue
+        if len(act_entries) >= MAX_ENTRIES:
+            break
         time_str = a.get("timestamp", "")
         app = a.get("app_name", "?")
         cat = a.get("category", "?")
@@ -115,6 +136,11 @@ async def generate_summary(
                 entry += f"\n  Screen content: {org_text}"
                 rich_count += 1
         act_entries.append(entry)
+
+    # Trim oldest entries (end of list, since ordered DESC) until prompt fits budget
+    total_chars = sum(len(e) for e in act_entries) + len(act_entries)  # +newlines
+    while total_chars > char_budget and act_entries:
+        total_chars -= len(act_entries.pop()) + 1
 
     acts_text = "\n".join(act_entries)
     act_count = len(act_entries)
@@ -138,19 +164,22 @@ Write the summary:"""
             lambda: llm_client.generate(
                 prompt=prompt,
                 temperature=0.3,
-                max_tokens=2048,
+                max_tokens=max_output,
             ),
         )
+        if not summary_text or not summary_text.strip():
+            raise ValueError("Empty response from LLM")
     except Exception as e:
-        summary_text = f"Summary generation failed: {e}"
+        logger.error(f"Summary generation failed: {e}")
+        return JSONResponse({"error": str(e)}, status_code=500)
 
-    # Compute day metrics (productive hours, categories, top repos)
+    # Only on success — persist + fire integrations
     metrics = _compute_day_metrics(activities)
 
     summary_obj = DailySummary(
         date=target,
         summary=summary_text,
-        total_activities=len(activities),
+        total_activities=real_count,
         category_breakdown=metrics["category_breakdown"],
         productive_hours=metrics["productive_hours"],
         top_repos=metrics["top_repos"],
@@ -158,7 +187,7 @@ Write the summary:"""
     db.upsert_daily_summary(summary_obj)
 
     # Fire integrations
-    _fire_summary_integrations(target, summary_text, "", act_count)
+    _fire_summary_integrations(target, summary_text, "", real_count)
 
     return {"date": target, "summary": {"summary": summary_text}}
 
@@ -176,12 +205,29 @@ async def generate_standup(
     if not activities:
         return {"date": target, "standup": "No activities to summarize."}
 
+    # Snapshot real count before any filtering/trimming
+    real_count = sum(1 for a in activities if a.get("status") == "ok")
+
+    if real_count == 0:
+        return {"date": target, "standup": "No analyzed activities to summarize."}
+
+    # Adapt output size to context window
+    max_output = min(1024, settings.context_window // 4)
+
+    # Budget for standup prompt
+    prompt_template_chars = 450  # The rules/format text around {acts_text}
+    available_tokens = settings.context_window - max_output - 300
+    char_budget = int(available_tokens * 3.0) - prompt_template_chars
+
     MAX_RICH = 15
+    MAX_ENTRIES = 150
     act_entries = []
     rich_count = 0
     for a in activities:
-        if not a.get("analyzed"):
+        if a.get("status") != "ok":
             continue
+        if len(act_entries) >= MAX_ENTRIES:
+            break
         app = a.get("app_name", "?")
         summary = a.get("summary", "")
         entry = f"- {app}: {summary}"
@@ -193,6 +239,11 @@ async def generate_standup(
                 entry += f"\n  Content: {org_text}"
                 rich_count += 1
         act_entries.append(entry)
+
+    # Trim oldest entries until prompt fits budget
+    total_chars = sum(len(e) for e in act_entries) + len(act_entries)
+    while total_chars > char_budget and act_entries:
+        total_chars -= len(act_entries.pop()) + 1
 
     acts_text = "\n".join(act_entries)
 
@@ -221,21 +272,22 @@ Activities:
             lambda: llm_client.generate(
                 prompt=prompt,
                 temperature=0.3,
-                max_tokens=1024,
+                max_tokens=max_output,
             ),
         )
+        if not standup or not standup.strip():
+            raise ValueError("Empty response from LLM")
     except Exception as e:
-        standup = f"Standup generation failed: {e}"
+        logger.error(f"Standup generation failed: {e}")
+        return JSONResponse({"error": str(e)}, status_code=500)
 
-    # Save standup to DB alongside summary — include metrics so we don't
-    # clobber values computed by generate_summary (upsert is unconditional
-    # on numeric/JSON columns).
+    # Only on success — persist + fire integrations
     from screenmind.storage.models import DailySummary
     metrics = _compute_day_metrics(activities)
     standup_summary = DailySummary(
         date=target,
         summary="",  # Don't overwrite existing summary
-        total_activities=len(activities),
+        total_activities=real_count,
         category_breakdown=metrics["category_breakdown"],
         productive_hours=metrics["productive_hours"],
         top_repos=metrics["top_repos"],
@@ -243,7 +295,7 @@ Activities:
     db.upsert_daily_summary(standup_summary, standup=standup)
 
     # Fire integrations
-    _fire_summary_integrations(target, "", standup, len(activities))
+    _fire_summary_integrations(target, "", standup, real_count)
 
     return {"date": target, "standup": standup}
 

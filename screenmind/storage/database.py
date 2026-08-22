@@ -114,6 +114,7 @@ class Database:
                 analyzed        BOOLEAN DEFAULT 0,
                 analysis_error  TEXT,
                 analysis_method TEXT,
+                status          TEXT DEFAULT 'pending',
                 created_at      DATETIME DEFAULT CURRENT_TIMESTAMP
             );
 
@@ -189,14 +190,39 @@ class Database:
             "ALTER TABLE activities ADD COLUMN analysis_method TEXT",
             # v6: add active_url column
             "ALTER TABLE activities ADD COLUMN active_url TEXT",
+            # v7: add status column (pending/ok/skipped/failed/dead)
+            # Replaces the ambiguous analyzed boolean for filtering real vs placeholder entries.
+            [
+                "ALTER TABLE activities ADD COLUMN status TEXT DEFAULT 'pending'",
+                # Backfill: derive status from summary text (the reliable signal).
+                # Do NOT use confidence as discriminator — early-adopter DBs may have
+                # real analyses stored at confidence=0.0 before _normalize existed.
+                """UPDATE activities SET status = CASE
+                    WHEN analyzed = 1 AND summary LIKE 'Skipped (corrupt%' THEN 'dead'
+                    WHEN analyzed = 1 AND summary LIKE 'Skipped (screenshot deleted%' THEN 'dead'
+                    WHEN analyzed = 1 AND confidence IS NULL THEN 'dead'
+                    WHEN analyzed = 1 AND summary = 'Skipped (analysis backlog)' THEN 'skipped'
+                    WHEN analyzed = 1 AND summary LIKE 'Analysis failed%' THEN 'failed'
+                    WHEN analyzed = 1 THEN 'ok'
+                    ELSE 'pending'
+                END WHERE status = 'pending'""",
+                "CREATE INDEX IF NOT EXISTS idx_activities_status ON activities(status)",
+            ],
         ]
 
-        for i, sql in enumerate(migrations, start=1):
+        for i, migration in enumerate(migrations, start=1):
             if i > current:
-                try:
-                    conn.execute(sql)
-                except Exception:
-                    logger.debug("Migration %d already applied", i)
+                statements = migration if isinstance(migration, list) else [migration]
+                for sql in statements:
+                    try:
+                        conn.execute(sql)
+                    except Exception as e:
+                        err_msg = str(e).lower()
+                        if "duplicate column" in err_msg or "already exists" in err_msg:
+                            logger.debug("Migration %d: %s (already applied)", i, e)
+                        else:
+                            logger.error("Migration %d failed: %s — SQL: %s", i, e, sql[:100])
+                            raise
                 conn.execute("INSERT OR REPLACE INTO schema_version (version) VALUES (?)", (i,))
 
         conn.commit()
@@ -235,7 +261,13 @@ class Database:
     # ── Activity CRUD ────────────────────────────────────────────────────
 
     def insert_activity(self, entry: ScreenshotEntry) -> int:
-        """Insert a new activity record. Returns the inserted row ID."""
+        """Insert a new activity. Returns the row id.
+
+        Note: status is NOT written here — it relies on the DDL default ('pending').
+        All real analysis finalization goes through update_activity_analysis(), which
+        sets status appropriately. If a future code path needs to insert a pre-analyzed
+        row, it must also set status via update_activity_analysis or raw SQL.
+        """
         conn = self._get_conn()
         analysis = entry.analysis
         cursor = conn.execute(
@@ -279,6 +311,7 @@ class Database:
         organized_text: Optional[str] = None,
         analysis_method: Optional[str] = None,
         active_url: Optional[str] = None,
+        status: str = "ok",
     ):
         """Update an existing activity with analysis results, OCR text, bounding boxes, and organized text."""
         conn = self._get_conn()
@@ -290,7 +323,7 @@ class Database:
                 embedding = ?, ocr_text = ?, ocr_boxes = ?,
                 scene_description = ?, organized_text = ?,
                 analysis_method = ?, active_url = ?,
-                analyzed = 1, analysis_error = NULL
+                analyzed = 1, status = ?, analysis_error = NULL
             WHERE id = ?
             """,
             (
@@ -308,6 +341,7 @@ class Database:
                 organized_text,
                 analysis_method,
                 active_url,
+                status,
                 activity_id,
             ),
         )
@@ -424,7 +458,7 @@ class Database:
 
         # Total activities
         total = conn.execute(
-            "SELECT COUNT(*) as cnt FROM activities WHERE DATE(timestamp) BETWEEN ? AND ? AND analyzed = 1",
+            "SELECT COUNT(*) as cnt FROM activities WHERE DATE(timestamp) BETWEEN ? AND ? AND status = 'ok'",
             (date_from, date_to),
         ).fetchone()["cnt"]
 
@@ -433,7 +467,7 @@ class Database:
             """
             SELECT category, COUNT(*) as cnt
             FROM activities
-            WHERE DATE(timestamp) BETWEEN ? AND ? AND analyzed = 1
+            WHERE DATE(timestamp) BETWEEN ? AND ? AND status = 'ok'
             GROUP BY category
             ORDER BY cnt DESC
             """,
@@ -445,7 +479,7 @@ class Database:
             """
             SELECT app_name, COUNT(*) as cnt
             FROM activities
-            WHERE DATE(timestamp) BETWEEN ? AND ? AND analyzed = 1
+            WHERE DATE(timestamp) BETWEEN ? AND ? AND status = 'ok'
             GROUP BY app_name
             ORDER BY cnt DESC
             LIMIT 10
@@ -482,6 +516,17 @@ class Database:
             meetings_count = 0
             meetings_minutes = 0
 
+        # Status breakdown (analysis pipeline health)
+        status_rows = conn.execute(
+            """
+            SELECT COALESCE(status, 'pending') as status, COUNT(*) as cnt
+            FROM activities
+            WHERE DATE(timestamp) BETWEEN ? AND ?
+            GROUP BY status
+            """,
+            (date_from, date_to),
+        ).fetchall()
+
         return {
             "total_activities": total,
             "category_breakdown": {r["category"]: r["cnt"] for r in categories},
@@ -489,6 +534,7 @@ class Database:
             "top_repos": {r["repo_name"]: r["cnt"] for r in repos},
             "meetings_count": meetings_count,
             "meetings_minutes": meetings_minutes,
+            "status_breakdown": {r["status"]: r["cnt"] for r in status_rows},
         }
 
     def get_hourly_heatmap(self, date_from: str, date_to: str) -> List[Dict]:
@@ -501,7 +547,7 @@ class Database:
                 CAST(strftime('%H', timestamp) AS INTEGER) as hour,
                 COUNT(*) as cnt
             FROM activities
-            WHERE DATE(timestamp) BETWEEN ? AND ? AND analyzed = 1
+            WHERE DATE(timestamp) BETWEEN ? AND ? AND status = 'ok'
             GROUP BY day_of_week, hour
             """,
             (date_from, date_to),
@@ -517,7 +563,7 @@ class Database:
             """
             SELECT id, timestamp, screenshot_path, app_name, category, summary, bookmarked
             FROM activities
-            WHERE DATE(timestamp) = ? AND analyzed = 1
+            WHERE DATE(timestamp) = ? AND status = 'ok'
             ORDER BY timestamp ASC
             """,
             (target_date,),

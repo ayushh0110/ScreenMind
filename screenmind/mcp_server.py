@@ -86,7 +86,7 @@ def search_screen(query: str, limit: int = 10) -> str:
             SELECT id, timestamp, app_name, category, summary, details,
                    visible_text, bookmarked, embedding, organized_text
             FROM activities
-            WHERE analyzed = 1 AND embedding IS NOT NULL
+            WHERE status = 'ok' AND embedding IS NOT NULL
             ORDER BY timestamp DESC
             LIMIT 500
             """,
@@ -131,7 +131,7 @@ def search_screen(query: str, limit: int = 10) -> str:
                    a.details, a.organized_text, a.bookmarked
             FROM activities_fts fts
             JOIN activities a ON a.id = fts.rowid
-            WHERE activities_fts MATCH ?
+            WHERE activities_fts MATCH ? AND a.status = 'ok'
             ORDER BY rank
             LIMIT ?
             """,
@@ -184,7 +184,7 @@ def get_recent_activity(count: int = 10) -> str:
         SELECT id, timestamp, app_name, category, summary, details,
                organized_text, bookmarked, mood
         FROM activities
-        WHERE analyzed = 1
+        WHERE status = 'ok'
         ORDER BY timestamp DESC
         LIMIT ?
         """,
@@ -239,7 +239,7 @@ def get_activity_by_time(
 
     conn = db._get_conn()
 
-    where = "analyzed = 1 AND DATE(timestamp) = ?"
+    where = "status = 'ok' AND DATE(timestamp) = ?"
     params = [date_str]
 
     if start_hour is not None:

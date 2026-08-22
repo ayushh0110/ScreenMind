@@ -140,7 +140,7 @@ class AnalysisWorker:
         try:
             conn = self._db._get_conn()
             pending = conn.execute(
-                "SELECT COUNT(*) FROM activities WHERE (analyzed = 0 OR summary = 'Skipped (analysis backlog)' OR summary LIKE 'Analysis failed%') AND DATE(timestamp) = DATE('now', 'localtime')"
+                "SELECT COUNT(*) FROM activities WHERE status IN ('pending', 'skipped', 'failed') AND DATE(timestamp) = DATE('now', 'localtime')"
             ).fetchone()[0]
             if pending:
                 logger.info(f"Found {pending} unanalyzed entries — will backfill during idle")
@@ -200,6 +200,7 @@ class AnalysisWorker:
                                 confidence=0.0,
                             ),
                             analysis_method="skipped",
+                            status="skipped",
                         )
                     self._cache_skips += 1
                     self._queue.task_done()
@@ -637,6 +638,7 @@ class AnalysisWorker:
                     activity_summary=f"Analysis failed: {str(e)[:100]}",
                     confidence=0.0,
                 ),
+                status="failed",
             )
 
     async def _backfill_skipped(self):
@@ -648,9 +650,7 @@ class AnalysisWorker:
             row = conn.execute(
                 """SELECT id, screenshot_path, window_title, app_name, ocr_text, ocr_boxes
                    FROM activities
-                   WHERE (analyzed = 0
-                      OR summary = 'Skipped (analysis backlog)'
-                      OR summary LIKE 'Analysis failed%')
+                   WHERE status IN ('pending', 'skipped', 'failed')
                      AND DATE(timestamp) = DATE('now', 'localtime')
                    ORDER BY timestamp DESC LIMIT 1""",
             ).fetchone()
@@ -662,9 +662,9 @@ class AnalysisWorker:
 
             # Check screenshot still exists on disk
             if not ss_path or not Path(ss_path).exists():
-                # Screenshot deleted — mark as permanently skipped
+                # Screenshot deleted — mark as permanently unprocessable
                 conn.execute(
-                    "UPDATE activities SET summary = 'Skipped (screenshot deleted)' WHERE id = ?",
+                    "UPDATE activities SET analyzed = 1, status = 'dead', summary = 'Skipped (screenshot deleted)' WHERE id = ?",
                     (activity_id,),
                 )
                 conn.commit()
@@ -685,7 +685,7 @@ class AnalysisWorker:
                 # Corrupt/truncated screenshot — mark as permanently failed
                 logger.warning(f"Backfill #{activity_id}: corrupt image, skipping permanently ({img_err})")
                 conn.execute(
-                    "UPDATE activities SET analyzed = 1, summary = 'Skipped (corrupt screenshot)' WHERE id = ?",
+                    "UPDATE activities SET analyzed = 1, status = 'dead', summary = 'Skipped (corrupt screenshot)' WHERE id = ?",
                     (activity_id,),
                 )
                 conn.commit()

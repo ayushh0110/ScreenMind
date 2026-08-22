@@ -78,7 +78,7 @@ async def sdk_activities(
                    scene_description, analysis_method, bookmarked
                    {', SUBSTR(ocr_text, 1, 500) AS ocr_text' if include_ocr else ''}
             FROM activities
-            WHERE {where} AND analyzed = 1
+            WHERE {where} AND status = 'ok'
             ORDER BY timestamp DESC
             LIMIT ? OFFSET ?""",
         params,

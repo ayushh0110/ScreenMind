@@ -309,7 +309,7 @@ def _run_markdown_agent(agent: dict) -> str:
     activities = db.get_activities_by_date(str(datetime.now().date()), limit=200)
 
     # Pre-compute stats from activities
-    analyzed = [a for a in activities if a.get("analyzed")]
+    analyzed = [a for a in activities if a.get("status") == "ok"]
     app_counter = Counter()
     cat_counter = Counter()
     mood_counter = Counter()

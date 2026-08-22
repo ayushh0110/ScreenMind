@@ -149,7 +149,12 @@ async function api(path, opts) {
     setTimeout(function() { document.getElementById('pin-input').focus(); }, 100);
     throw new Error('Session expired');
   }
-  if (!r.ok) throw new Error(`API ${r.status}`);
+  if (!r.ok) {
+    const detail = await r.json().catch(() => ({}));
+    const e = new Error(detail.error || detail.detail || `API ${r.status}`);
+    e.detail = detail.error || detail.detail;
+    throw e;
+  }
   return r.json();
 }
 async function apiPost(path) {

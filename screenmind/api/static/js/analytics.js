@@ -42,6 +42,41 @@ async function loadAnalytics(range) {
       <div class="stat-card" style="animation-delay:0.4s"><div class="stat-icon">🎙️</div><div class="stat-value" data-count="${meetingsCount}">0</div><div class="stat-label">Meetings</div></div>
       <div class="stat-card" style="animation-delay:0.5s"><div class="stat-icon">⏳</div><div class="stat-value">${meetingsCount > 0 ? meetingsHrs : '—'}</div><div class="stat-label">Meeting Time</div></div>`;
 
+    // Status breakdown card
+    const sb = data.status_breakdown || {};
+    const okCount = sb.ok || 0;
+    const pendingCount = sb.pending || 0;
+    const skippedCount = sb.skipped || 0;
+    const failedCount = sb.failed || 0;
+    const deadCount = sb.dead || 0;
+    const totalAll = okCount + pendingCount + skippedCount + failedCount + deadCount;
+    const pct = totalAll > 0 ? Math.round((okCount / totalAll) * 100) : 0;
+
+    // Remove previous status card if switching range
+    const oldCard = document.getElementById('status-breakdown-card');
+    if (oldCard) oldCard.remove();
+
+    if (totalAll > 0) {
+      const statusCard = document.createElement('div');
+      statusCard.className = 'card';
+      statusCard.id = 'status-breakdown-card';
+      statusCard.style.cssText = 'animation-delay:0.6s; margin-top: 16px;';
+      statusCard.innerHTML = `
+        <div class="card-header"><span class="card-title">Analysis Status</span><span style="color:#64748b;font-size:13px">${pct}% analyzed</span></div>
+        <div style="display:flex;gap:16px;flex-wrap:wrap;padding:4px 0 8px">
+          <div style="display:flex;align-items:center;gap:6px"><span style="color:#10b981">✅</span><span style="color:#e2e8f0;font-weight:500">${okCount}</span><span style="color:#64748b;font-size:13px">Analyzed</span></div>
+          ${pendingCount > 0 ? `<div style="display:flex;align-items:center;gap:6px"><span style="color:#f59e0b">⏳</span><span style="color:#e2e8f0;font-weight:500">${pendingCount}</span><span style="color:#64748b;font-size:13px">Pending</span></div>` : ''}
+          ${skippedCount > 0 ? `<div style="display:flex;align-items:center;gap:6px"><span style="color:#6366f1">⏭️</span><span style="color:#e2e8f0;font-weight:500">${skippedCount}</span><span style="color:#64748b;font-size:13px">Skipped</span></div>` : ''}
+          ${failedCount > 0 ? `<div style="display:flex;align-items:center;gap:6px"><span style="color:#ef4444">❌</span><span style="color:#e2e8f0;font-weight:500">${failedCount}</span><span style="color:#64748b;font-size:13px">Failed</span></div>` : ''}
+          ${deadCount > 0 ? `<div style="display:flex;align-items:center;gap:6px"><span style="color:#6b7280">💀</span><span style="color:#e2e8f0;font-weight:500">${deadCount}</span><span style="color:#64748b;font-size:13px">Dead</span></div>` : ''}
+        </div>
+        <div style="width:100%;height:6px;background:rgba(255,255,255,0.06);border-radius:3px;overflow:hidden">
+          <div style="height:100%;width:${pct}%;background:linear-gradient(90deg,#10b981,#34d399);border-radius:3px;transition:width 0.8s ease"></div>
+        </div>`;
+      const grid = $('#stats-grid');
+      grid.parentNode.insertBefore(statusCard, grid.nextElementSibling);
+    }
+
     // Animate counters
     $$('.stat-value[data-count]').forEach(el => {
       animateValue(el, parseFloat(el.dataset.count));

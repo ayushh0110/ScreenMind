@@ -203,7 +203,7 @@ async def chat_with_memory(request: Request):
                            ocr_text, organized_text, screenshot_path, window_title,
                            scene_description, embedding
                     FROM activities
-                    WHERE id IN ({placeholders}) AND analyzed = 1{_date_filter_sql}
+                    WHERE id IN ({placeholders}) AND status = 'ok'{_date_filter_sql}
                     ORDER BY timestamp DESC""",
                     fts_ids,
                 ).fetchall()
@@ -217,7 +217,7 @@ async def chat_with_memory(request: Request):
                                ocr_text, organized_text, screenshot_path, window_title,
                                scene_description, embedding
                         FROM activities
-                        WHERE analyzed = 1 AND embedding IS NOT NULL{_date_filter_sql}
+                        WHERE status = 'ok' AND embedding IS NOT NULL{_date_filter_sql}
                         ORDER BY timestamp DESC LIMIT 10""",
                     ).fetchall()
                     for r in fill_rows:
@@ -303,7 +303,7 @@ async def chat_with_memory(request: Request):
                            ocr_text, organized_text, screenshot_path, window_title,
                            scene_description, embedding
                     FROM activities
-                    WHERE analyzed = 1 AND embedding IS NOT NULL{_date_filter_sql}
+                    WHERE status = 'ok' AND embedding IS NOT NULL{_date_filter_sql}
                     ORDER BY timestamp DESC LIMIT 500""",
                 ).fetchall()
                 fb_candidates = [dict(r) for r in fallback_rows]
