@@ -13,9 +13,9 @@ async function renderSettings(el) {
 
   function _sec(icon, title) { return '<div class="settings-section"><span class="settings-section-icon">' + icon + '</span><span class="settings-section-title">' + title + '</span></div>'; }
   function _sw(id, checked) { return '<label class="toggle-switch"><input type="checkbox" id="' + id + '" ' + (checked ? 'checked' : '') + '><span class="toggle-slider"></span></label>'; }
-  function _rp(name, val, label, cur) { return '<label class="radio-pill ' + (cur === val ? 'active' : '') + '"><input type="radio" name="' + name + '" value="' + val + '" ' + (cur === val ? 'checked' : '') + '> ' + label + '</label>'; }
+  function _rp(name, val, label, cur) { return '<label class="radio-pill ' + (String(cur) === String(val) ? 'active' : '') + '"><input type="radio" name="' + name + '" value="' + val + '" ' + (String(cur) === String(val) ? 'checked' : '') + '> ' + label + '</label>'; }
 
-  var wh_events = (cfg.webhook_events || 'summary,standup').split(',');
+  var wh_events = (cfg.webhook_events || 'daily_summary,standup').split(',');
 
   el.innerHTML = '<div class="settings-grid">'
 
@@ -133,7 +133,7 @@ async function renderSettings(el) {
   + '<input type="text" id="webhook-url" class="settings-text-input" value="' + (cfg.webhook_url || '') + '" placeholder="https://hooks.slack.com/..."></div>'
   + '<div class="settings-input-row"><label class="settings-label">Events to fire on:</label>'
   + '<div style="display:flex;flex-wrap:wrap;gap:8px;margin-top:4px">'
-  + ['summary','standup','bookmark','meeting_end','capture_milestone'].map(function(ev) {
+  + ['daily_summary','standup','bookmark','meeting_end','capture_milestone'].map(function(ev) {
       return '<label style="display:flex;align-items:center;gap:4px;font-size:0.82rem;color:var(--text-secondary);cursor:pointer"><input type="checkbox" class="webhook-event-cb" value="' + ev + '" ' + (wh_events.indexOf(ev) >= 0 ? 'checked' : '') + ' style="accent-color:var(--accent)"> ' + ev + '</label>';
     }).join('') + '</div></div>'
   + '<div class="settings-input-row"><label class="settings-label">HMAC Secret (for <code>X-ScreenMind-Signature</code>):</label>'
@@ -141,8 +141,21 @@ async function renderSettings(el) {
   + '<div class="settings-input-row"><label class="settings-label">Custom Headers (one per line: <code>Header: value</code>):</label>'
   + '<textarea id="webhook-headers" class="settings-text-input" rows="2" style="resize:vertical;font-family:monospace;font-size:0.78rem" placeholder="Authorization: Bearer xxx">' + (cfg.webhook_headers || '') + '</textarea></div>'
   + '<div style="display:flex;gap:8px;align-items:center;margin-top:8px"><button class="btn btn-sm" onclick="testIntegration(\'webhook\')">Test Webhook</button><span id="webhook-test-result" style="font-size:0.8rem"></span></div>'
-  + '<div style="margin-top:12px"><button class="btn btn-sm btn-ghost" onclick="loadWebhookLog()" style="margin-bottom:6px">View Delivery Log</button>'
-  + '<div id="webhook-log" style="font-size:0.78rem;max-height:200px;overflow-y:auto"></div></div></div>'
+  + '<div style="margin-top:12px"><button id="webhook-log-toggle" class="btn btn-sm btn-ghost" onclick="toggleWebhookLog()" style="margin-bottom:6px">View Delivery Log</button>'
+  + '<div id="webhook-log" style="font-size:0.78rem;max-height:200px;overflow-y:auto;display:none"></div></div></div>'
+
+  // Extra webhooks
+  + '<div id="extra-hooks-container">'
+  + (function() {
+    var hooks = cfg.webhook_extra || [];
+    var html = '';
+    for (var i = 0; i < hooks.length; i++) {
+      html += _renderExtraHook(hooks[i], i);
+    }
+    return html;
+  })()
+  + '</div>'
+  + '<div style="margin-top:8px;margin-bottom:16px"><button class="btn btn-sm btn-ghost" onclick="addExtraHook()" style="display:flex;align-items:center;gap:4px">&#43; Add Webhook</button></div>'
 
   // ── AUTOMATION ──
   + _sec('&#129302;', 'Automation')
@@ -196,8 +209,13 @@ async function renderSettings(el) {
   + _sw('encryption-enabled', cfg.encryption_enabled) + '</div>'
   + '<div class="settings-note">Key stored in OS keyring. Requires <code>pip install cryptography keyring</code>.</div></div>'
 
-  + '</div>'
-  + '<button class="btn btn-primary settings-save" id="save-settings" onclick="saveSettings()">Save Settings</button>';
+  + '</div>';
+
+  // Inject Save button into header bar
+  var headerActions = document.getElementById('header-actions');
+  if (headerActions) {
+    headerActions.innerHTML = '<button class="btn btn-sm" id="save-settings" onclick="saveSettings()" style="padding:6px 18px;font-size:0.82rem;font-weight:600;border-radius:8px;background:rgba(255,255,255,0.06);color:var(--text-muted);border:1px solid rgba(255,255,255,0.08);cursor:default;transition:all 0.25s ease" disabled>Saved</button>';
+  }
 
   // Radio button visual toggle
   el.querySelectorAll('.radio-pill input').forEach(function(radio) {
@@ -220,6 +238,9 @@ async function renderSettings(el) {
       document.getElementById('ctx-value').textContent = ctxSlider.value;
     });
   }
+
+  // Track changes for save button state
+  setTimeout(function() { _trackSettingsChanges(el); }, 100);
 
   // Startup toggle (uses separate API, not saveSettings)
   var startupToggle = document.getElementById('startup-toggle');
@@ -496,6 +517,7 @@ window.saveSettings = async function() {
     webhook_events: (function() { var evts=[]; document.querySelectorAll('.webhook-event-cb:checked').forEach(function(cb){evts.push(cb.value)}); return evts.join(','); })(),
     webhook_secret: (document.getElementById('webhook-secret') || {}).value || '',
     webhook_headers: (document.getElementById('webhook-headers') || {}).value || '',
+    webhook_extra: _collectExtraHooks(),
     // Automation
     agents_enabled: document.getElementById('agents-enabled').checked,
     agents_auto_run_python: document.getElementById('agents-auto-run-python').checked,
@@ -525,6 +547,7 @@ window.saveSettings = async function() {
       body: JSON.stringify(body),
     });
     showToast('Settings saved', 'success');
+    _markSettingsSaved();
   } catch {
     showToast('Failed to save settings', 'warning');
   }
@@ -601,19 +624,307 @@ window.loadWebhookLog = async function() {
       var time = d.timestamp ? d.timestamp.replace('T', ' ').replace('Z', '') : '';
       time = time.substring(5, 16); // MM-DD HH:MM
       var retry = d.attempt > 1 ? ' <span style="color:#f59e0b">(retry)</span>' : '';
+      var hookLabel = d.hook_name ? '<span style="color:' + (d.hook_name === 'default' ? 'var(--text-muted)' : 'var(--accent)') + ';font-size:0.72rem">' + d.hook_name + '</span>' : '';
       var err = d.error ? '<br><span style="color:#ef4444;font-size:0.72rem">' + d.error.substring(0, 60) + '</span>' : '';
       return '<tr style="border-bottom:1px solid rgba(255,255,255,0.04)">' +
         '<td style="padding:4px 8px">' + icon + '</td>' +
         '<td style="padding:4px 8px;color:var(--text-muted)">' + time + '</td>' +
         '<td style="padding:4px 8px"><code style="font-size:0.75rem">' + d.event + '</code>' + retry + '</td>' +
-        '<td style="padding:4px 8px;color:var(--text-muted);max-width:200px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">' + d.url + '</td>' +
+        '<td style="padding:4px 8px">' + hookLabel + '</td>' +
+        '<td style="padding:4px 8px;color:var(--text-muted);max-width:180px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">' + d.url + '</td>' +
         '<td style="padding:4px 8px">' + (d.status_code || '') + err + '</td></tr>';
     }).join('');
-    logEl.innerHTML = '<table style="width:100%;border-collapse:collapse"><thead><tr style="border-bottom:1px solid rgba(255,255,255,0.1)"><th style="padding:4px 8px;text-align:left;font-size:0.72rem;color:var(--text-muted)"></th><th style="text-align:left;font-size:0.72rem;color:var(--text-muted);padding:4px 8px">Time</th><th style="text-align:left;font-size:0.72rem;color:var(--text-muted);padding:4px 8px">Event</th><th style="text-align:left;font-size:0.72rem;color:var(--text-muted);padding:4px 8px">URL</th><th style="text-align:left;font-size:0.72rem;color:var(--text-muted);padding:4px 8px">Status</th></tr></thead><tbody id="log-tbody">' + rows + '</tbody></table>';
+    logEl.innerHTML = '<table style="width:100%;border-collapse:collapse"><thead><tr style="border-bottom:1px solid rgba(255,255,255,0.1)"><th style="padding:4px 8px;text-align:left;font-size:0.72rem;color:var(--text-muted)"></th><th style="text-align:left;font-size:0.72rem;color:var(--text-muted);padding:4px 8px">Time</th><th style="text-align:left;font-size:0.72rem;color:var(--text-muted);padding:4px 8px">Event</th><th style="text-align:left;font-size:0.72rem;color:var(--text-muted);padding:4px 8px">Hook</th><th style="text-align:left;font-size:0.72rem;color:var(--text-muted);padding:4px 8px">URL</th><th style="text-align:left;font-size:0.72rem;color:var(--text-muted);padding:4px 8px">Status</th></tr></thead><tbody id="log-tbody">' + rows + '</tbody></table>';
   } catch (e) {
     logEl.innerHTML = '<span style="color:#ef4444">Failed to load: ' + e.message + '</span>';
   }
 };
+
+window.toggleWebhookLog = function() {
+  var logEl = document.getElementById('webhook-log');
+  var btn = document.getElementById('webhook-log-toggle');
+  if (!logEl || !btn) return;
+  if (logEl.style.display === 'none' || !logEl.style.display) {
+    logEl.style.display = 'block';
+    btn.textContent = 'Close Delivery Log';
+    loadWebhookLog();
+  } else {
+    logEl.style.display = 'none';
+    logEl.innerHTML = '';
+    btn.textContent = 'View Delivery Log';
+  }
+};
+
+// ── Extra Webhook Hooks ────────────────────────────────────────────────
+
+var _extraHookCounter = 0;
+
+function _renderExtraHook(hook, idx) {
+  var id = 'extra-hook-' + idx;
+  var events = (hook.events || '').split(',');
+  var allEvents = ['daily_summary','standup','bookmark','meeting_end','capture_milestone'];
+  return '<div class="settings-card extra-hook-card" data-hookidx="' + idx + '" style="border-left:3px solid var(--accent);margin-top:8px">'
+    + '<div class="settings-card-header"><div>'
+    + '<div class="settings-title" style="font-size:0.9rem">🔗 ' + (hook.name || 'unnamed') + '</div>'
+    + '<div class="settings-desc" style="font-size:0.75rem">Extra webhook profile</div></div>'
+    + '<div style="display:flex;gap:8px;align-items:center">'
+    + '<label style="font-size:0.78rem;color:var(--text-secondary);display:flex;align-items:center;gap:4px"><input type="checkbox" class="ehook-enabled" ' + (hook.enabled !== false ? 'checked' : '') + ' style="accent-color:var(--accent)"> Enabled</label>'
+    + '<button class="btn btn-sm" style="color:#ef4444;font-size:0.75rem" onclick="removeExtraHook(' + idx + ')">✕</button>'
+    + '</div></div>'
+    + '<input type="hidden" class="ehook-name" value="' + (hook.name || '') + '">'
+    + '<div class="settings-input-row"><label class="settings-label" style="font-size:0.8rem">URL:</label>'
+    + '<input type="text" class="settings-text-input ehook-url" value="' + (hook.url || '') + '" placeholder="https://..."></div>'
+    + '<div class="settings-input-row"><label class="settings-label" style="font-size:0.8rem">Events:</label>'
+    + '<div style="display:flex;flex-wrap:wrap;gap:6px;margin-top:2px">'
+    + allEvents.map(function(ev) {
+        return '<label style="display:flex;align-items:center;gap:3px;font-size:0.78rem;color:var(--text-secondary);cursor:pointer"><input type="checkbox" class="ehook-event" value="' + ev + '" ' + (events.indexOf(ev) >= 0 ? 'checked' : '') + ' style="accent-color:var(--accent)"> ' + ev + '</label>';
+      }).join('')
+    + '</div></div>'
+    + '<div class="settings-input-row"><label class="settings-label" style="font-size:0.8rem">HMAC Secret:</label>'
+    + '<input type="text" class="settings-text-input ehook-secret" value="' + (hook.secret || '') + '" placeholder="optional"></div>'
+    + '<div class="settings-input-row"><label class="settings-label" style="font-size:0.8rem">Custom Headers:</label>'
+    + '<textarea class="settings-text-input ehook-headers" rows="1" style="resize:vertical;font-family:monospace;font-size:0.75rem" placeholder="Key: Value">' + (hook.headers || '') + '</textarea></div>'
+    + '<div style="display:flex;gap:8px;align-items:center;margin-top:8px"><button class="btn btn-sm" onclick="testExtraHook(' + idx + ')">Test Webhook</button><span id="ehook-test-result-' + idx + '" style="font-size:0.8rem"></span></div>'
+    + '</div>';
+}
+
+function _collectExtraHooks() {
+  var hooks = [];
+  var cards = document.querySelectorAll('.extra-hook-card');
+  cards.forEach(function(card) {
+    var evts = [];
+    card.querySelectorAll('.ehook-event:checked').forEach(function(cb) { evts.push(cb.value); });
+    hooks.push({
+      name: (card.querySelector('.ehook-name') || {}).value || 'unnamed',
+      url: (card.querySelector('.ehook-url') || {}).value || '',
+      events: evts.join(','),
+      secret: (card.querySelector('.ehook-secret') || {}).value || '',
+      headers: (card.querySelector('.ehook-headers') || {}).value || '',
+      enabled: (card.querySelector('.ehook-enabled') || {}).checked !== false,
+    });
+  });
+  return hooks;
+}
+
+window.addExtraHook = function() {
+  _showHookNameModal(function(name) {
+    name = name.trim().toLowerCase().replace(/[^a-z0-9_-]/g, '');
+    if (!name) { showToast('Invalid name. Use letters, numbers, hyphens, underscores.', 'warning'); return; }
+    // Check for duplicate names
+    var existing = document.querySelectorAll('.ehook-name');
+    for (var i = 0; i < existing.length; i++) {
+      if (existing[i].value === name) { showToast('A hook named "' + name + '" already exists.', 'warning'); return; }
+    }
+    var container = document.getElementById('extra-hooks-container');
+    if (!container) return;
+    var idx = _extraHookCounter++;
+    var html = _renderExtraHook({ name: name, url: '', events: 'daily_summary,standup,bookmark', secret: '', headers: '', enabled: true }, idx);
+    container.insertAdjacentHTML('beforeend', html);
+  });
+};
+
+window.removeExtraHook = function(idx) {
+  var card = document.querySelector('.extra-hook-card[data-hookidx="' + idx + '"]');
+  if (!card) return;
+  var hookName = (card.querySelector('.ehook-name') || {}).value || 'this webhook';
+  _showConfirmModal('Remove "' + hookName + '"?', 'This webhook profile will be deleted. Save settings to apply.', function() {
+    card.remove();
+  });
+};
+
+function _showConfirmModal(title, message, onConfirm) {
+  var old = document.getElementById('confirm-modal');
+  if (old) old.remove();
+
+  var overlay = document.createElement('div');
+  overlay.id = 'confirm-modal';
+  overlay.style.cssText = 'position:fixed;inset:0;z-index:9999;display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,0.6);backdrop-filter:blur(4px);animation:fadeIn 0.15s ease-out';
+
+  var modal = document.createElement('div');
+  modal.style.cssText = 'background:var(--bg-secondary,#1a1a2e);border:1px solid rgba(255,255,255,0.1);border-radius:12px;padding:24px;min-width:320px;max-width:400px;box-shadow:0 20px 60px rgba(0,0,0,0.5)';
+
+  modal.innerHTML = '<div style="font-size:1rem;font-weight:600;color:var(--text-primary);margin-bottom:4px">' + title + '</div>'
+    + '<div style="font-size:0.82rem;color:var(--text-muted);margin-bottom:20px">' + message + '</div>'
+    + '<div style="display:flex;gap:8px;justify-content:flex-end">'
+    + '<button id="confirm-cancel" class="btn btn-sm btn-ghost" style="padding:8px 16px">Cancel</button>'
+    + '<button id="confirm-yes" class="btn btn-sm" style="padding:8px 16px;background:#ef4444;color:#fff;border:none">Remove</button>'
+    + '</div>';
+
+  overlay.appendChild(modal);
+  document.body.appendChild(overlay);
+
+  function close() { overlay.remove(); }
+  document.getElementById('confirm-cancel').onclick = close;
+  document.getElementById('confirm-yes').onclick = function() { close(); onConfirm(); };
+  overlay.addEventListener('click', function(e) { if (e.target === overlay) close(); });
+  document.addEventListener('keydown', function handler(e) {
+    if (e.key === 'Escape') { close(); document.removeEventListener('keydown', handler); }
+  });
+}
+
+window.testExtraHook = async function(idx) {
+  var card = document.querySelector('.extra-hook-card[data-hookidx="' + idx + '"]');
+  if (!card) return;
+  var url = (card.querySelector('.ehook-url') || {}).value;
+  var secret = (card.querySelector('.ehook-secret') || {}).value || '';
+  var headers = (card.querySelector('.ehook-headers') || {}).value || '';
+  var resultEl = document.getElementById('ehook-test-result-' + idx);
+  if (!url) { if (resultEl) resultEl.innerHTML = '<span style="color:#f59e0b">Enter a URL first</span>'; return; }
+  if (resultEl) resultEl.innerHTML = '<span style="color:var(--text-muted)">Testing...</span>';
+  try {
+    var resp = await fetch('/api/integrations/test', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ type: 'webhook', url: url, secret: secret, headers: headers }),
+    });
+    var result = await resp.json();
+    if (result.ok) {
+      resultEl.innerHTML = '<span style="color:#10b981">✅ Connection successful</span>';
+    } else {
+      resultEl.innerHTML = '<span style="color:#f59e0b">❌ ' + (result.error || 'Failed') + '</span>';
+    }
+  } catch (e) {
+    resultEl.innerHTML = '<span style="color:#ef4444">❌ ' + e.message + '</span>';
+  }
+};
+
+// ── Themed Modal for Hook Name ─────────────────────────────────────────
+
+function _showHookNameModal(onSubmit) {
+  // Remove any existing modal
+  var old = document.getElementById('hook-name-modal');
+  if (old) old.remove();
+
+  var overlay = document.createElement('div');
+  overlay.id = 'hook-name-modal';
+  overlay.style.cssText = 'position:fixed;inset:0;z-index:9999;display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,0.6);backdrop-filter:blur(4px);animation:fadeIn 0.15s ease-out';
+
+  var modal = document.createElement('div');
+  modal.style.cssText = 'background:var(--bg-secondary,#1a1a2e);border:1px solid rgba(255,255,255,0.1);border-radius:12px;padding:24px;min-width:340px;max-width:400px;box-shadow:0 20px 60px rgba(0,0,0,0.5)';
+
+  modal.innerHTML = '<div style="font-size:1rem;font-weight:600;color:var(--text-primary);margin-bottom:4px">Add Webhook</div>'
+    + '<div style="font-size:0.8rem;color:var(--text-muted);margin-bottom:16px">Give this webhook a name for easy identification.</div>'
+    + '<input id="hook-name-input" type="text" class="settings-text-input" placeholder="e.g. discord, slack, alerts" style="width:100%;box-sizing:border-box;font-size:0.85rem;padding:10px 12px" autofocus>'
+    + '<div id="hook-name-error" style="font-size:0.75rem;color:#ef4444;margin-top:6px;min-height:18px"></div>'
+    + '<div style="display:flex;gap:8px;justify-content:flex-end;margin-top:12px">'
+    + '<button id="hook-name-cancel" class="btn btn-sm btn-ghost" style="padding:8px 16px">Cancel</button>'
+    + '<button id="hook-name-submit" class="btn btn-sm btn-primary" style="padding:8px 16px">Add</button>'
+    + '</div>';
+
+  overlay.appendChild(modal);
+  document.body.appendChild(overlay);
+
+  var input = document.getElementById('hook-name-input');
+  var errorEl = document.getElementById('hook-name-error');
+  setTimeout(function() { input.focus(); }, 50);
+
+  function close() { overlay.remove(); }
+
+  function submit() {
+    var val = input.value.trim();
+    if (!val) { errorEl.textContent = 'Name is required'; input.focus(); return; }
+    var cleaned = val.toLowerCase().replace(/[^a-z0-9_-]/g, '');
+    if (!cleaned) { errorEl.textContent = 'Use only letters, numbers, hyphens, underscores'; input.focus(); return; }
+    close();
+    onSubmit(cleaned);
+  }
+
+  document.getElementById('hook-name-cancel').onclick = close;
+  document.getElementById('hook-name-submit').onclick = submit;
+  overlay.addEventListener('click', function(e) { if (e.target === overlay) close(); });
+  input.addEventListener('keydown', function(e) {
+    errorEl.textContent = '';
+    if (e.key === 'Enter') { e.preventDefault(); submit(); }
+    if (e.key === 'Escape') close();
+  });
+}
+
+// ── Settings Change Tracking ──────────────────────────────────────────
+
+var _settingsSnapshot = '';
+
+function _captureSettingsSnapshot(container) {
+  // Capture current state of all form inputs as a string for comparison
+  var parts = [];
+  container.querySelectorAll('input, textarea, select').forEach(function(el) {
+    if (el.type === 'checkbox' || el.type === 'radio') {
+      parts.push(el.id + ':' + el.checked);
+    } else {
+      parts.push(el.id + ':' + el.value);
+    }
+  });
+  return parts.join('|');
+}
+
+function _getCurrentSettingsState(container) {
+  return _captureSettingsSnapshot(container);
+}
+
+function _markSettingsUnsaved() {
+  var btn = document.getElementById('save-settings');
+  if (!btn) return;
+  btn.disabled = false;
+  btn.textContent = 'Save';
+  btn.style.background = '#10b981';
+  btn.style.color = '#fff';
+  btn.style.border = '1px solid #10b981';
+  btn.style.cursor = 'pointer';
+  btn.style.boxShadow = '0 0 12px rgba(16,185,129,0.3)';
+}
+
+function _markSettingsSaved() {
+  var btn = document.getElementById('save-settings');
+  if (!btn) return;
+  btn.disabled = true;
+  btn.textContent = 'Saved';
+  btn.style.background = 'rgba(255,255,255,0.06)';
+  btn.style.color = 'var(--text-muted)';
+  btn.style.border = '1px solid rgba(255,255,255,0.08)';
+  btn.style.cursor = 'default';
+  btn.style.boxShadow = 'none';
+  // Update snapshot to current state
+  var container = document.querySelector('.settings-grid');
+  if (container) _settingsSnapshot = _captureSettingsSnapshot(container);
+}
+
+function _trackSettingsChanges(container) {
+  // Capture initial snapshot
+  _settingsSnapshot = _captureSettingsSnapshot(container);
+
+  // Listen for any input change
+  container.addEventListener('input', function() {
+    var current = _getCurrentSettingsState(container);
+    if (current !== _settingsSnapshot) {
+      _markSettingsUnsaved();
+    } else {
+      _markSettingsSaved();
+    }
+  });
+  container.addEventListener('change', function() {
+    var current = _getCurrentSettingsState(container);
+    if (current !== _settingsSnapshot) {
+      _markSettingsUnsaved();
+    } else {
+      _markSettingsSaved();
+    }
+  });
+}
+
+// Clean up header-actions when navigating away from settings
+document.addEventListener('click', function(e) {
+  var navItem = e.target.closest('.nav-item');
+  if (navItem && navItem.dataset.view !== 'settings') {
+    var ha = document.getElementById('header-actions');
+    if (ha) ha.innerHTML = '';
+  }
+});
+window.addEventListener('hashchange', function() {
+  var view = window.location.hash.slice(1);
+  if (view && view !== 'settings') {
+    var ha = document.getElementById('header-actions');
+    if (ha) ha.innerHTML = '';
+  }
+});
 
 // ── Init ──────────────────────────────────────────────────
 function _initApp() {

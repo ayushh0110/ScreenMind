@@ -1,5 +1,6 @@
 """Settings routes — get/update config, integration tests, webhook log."""
 
+import json
 import sys
 
 from fastapi import APIRouter, Request
@@ -36,6 +37,7 @@ async def get_settings():
         "webhook_events": settings.webhook_events,
         "webhook_secret": settings.webhook_secret,
         "webhook_headers": settings.webhook_headers,
+        "webhook_extra": json.loads(settings.webhook_extra) if settings.webhook_extra else [],
         "smart_notifications": settings.smart_notifications,
         "distraction_minutes": settings.distraction_minutes,
         "break_reminder_minutes": settings.break_reminder_minutes,
@@ -59,6 +61,9 @@ async def get_settings():
 async def update_settings(request: Request):
     """Update resource management settings (persists to settings.json)."""
     body = await request.json()
+    # Serialize webhook_extra list to JSON string for storage
+    if "webhook_extra" in body and isinstance(body["webhook_extra"], list):
+        body["webhook_extra"] = json.dumps(body["webhook_extra"])
     settings.save_runtime_overrides(body)
     return {
         "status": "saved",
@@ -85,6 +90,7 @@ async def update_settings(request: Request):
         "webhook_events": settings.webhook_events,
         "webhook_secret": settings.webhook_secret,
         "webhook_headers": settings.webhook_headers,
+        "webhook_extra": json.loads(settings.webhook_extra) if settings.webhook_extra else [],
         "smart_notifications": settings.smart_notifications,
         "distraction_minutes": settings.distraction_minutes,
         "break_reminder_minutes": settings.break_reminder_minutes,

@@ -159,16 +159,25 @@ Activities:
 Write the summary:"""
 
     try:
-        summary_text = await asyncio.get_event_loop().run_in_executor(
-            None,
-            lambda: llm_client.generate(
-                prompt=prompt,
-                temperature=0.3,
-                max_tokens=max_output,
-            ),
-        )
+        from screenmind.engine.llm_client import _cancel_event
+        summary_text = ""
+        for attempt in range(3):
+            if _cancel_event.is_set():
+                raise ValueError("Inference cancelled")
+            temp = 0.3 + (attempt * 0.1)
+            summary_text = await asyncio.get_event_loop().run_in_executor(
+                None,
+                lambda t=temp: llm_client.generate(
+                    prompt=prompt,
+                    temperature=t,
+                    max_tokens=max_output,
+                ),
+            )
+            if summary_text and summary_text.strip():
+                break
+            logger.warning(f"Summary empty output (attempt {attempt+1}/3, temp={temp})")
         if not summary_text or not summary_text.strip():
-            raise ValueError("Empty response from LLM")
+            raise ValueError("Empty response from LLM after 3 attempts")
     except Exception as e:
         logger.error(f"Summary generation failed: {e}")
         return JSONResponse({"error": str(e)}, status_code=500)
@@ -267,16 +276,25 @@ Activities:
 {acts_text}"""
 
     try:
-        standup = await asyncio.get_event_loop().run_in_executor(
-            None,
-            lambda: llm_client.generate(
-                prompt=prompt,
-                temperature=0.3,
-                max_tokens=max_output,
-            ),
-        )
+        from screenmind.engine.llm_client import _cancel_event
+        standup = ""
+        for attempt in range(3):
+            if _cancel_event.is_set():
+                raise ValueError("Inference cancelled")
+            temp = 0.3 + (attempt * 0.1)
+            standup = await asyncio.get_event_loop().run_in_executor(
+                None,
+                lambda t=temp: llm_client.generate(
+                    prompt=prompt,
+                    temperature=t,
+                    max_tokens=max_output,
+                ),
+            )
+            if standup and standup.strip():
+                break
+            logger.warning(f"Standup empty output (attempt {attempt+1}/3, temp={temp})")
         if not standup or not standup.strip():
-            raise ValueError("Empty response from LLM")
+            raise ValueError("Empty response from LLM after 3 attempts")
     except Exception as e:
         logger.error(f"Standup generation failed: {e}")
         return JSONResponse({"error": str(e)}, status_code=500)
@@ -317,13 +335,13 @@ def _fire_summary_integrations(date_str: str, summary: str, standup: str, activi
         logger.error(f"Notion error: {e}")
 
     try:
-        if settings.webhook_enabled and settings.webhook_url:
-            from screenmind.integrations.webhooks import fire
-            fire("daily_summary", {
+        if settings.webhook_enabled or settings.webhook_extra != "[]":
+            from screenmind.integrations.webhooks import fire_all
+            fire_all("daily_summary", {
                 "date": date_str,
                 "summary": summary,
                 "standup": standup,
                 "activity_count": activity_count,
-            }, settings.webhook_url, settings.webhook_secret, settings.webhook_events, settings.webhook_headers)
+            })
     except Exception as e:
         logger.error(f"Webhook error: {e}")

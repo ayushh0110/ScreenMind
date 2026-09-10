@@ -435,8 +435,10 @@ window.saveAgentContent = async function() {
   var statusEl = document.getElementById('editor-status');
   statusEl.textContent = 'Saving...';
   statusEl.style.color = '#f59e0b';
+  var saveHdrs = {'Content-Type': 'application/json'};
+  if (_editingAgentType === 'python') saveHdrs['X-Confirm'] = 'true';
   var r = await fetch('/api/agents/' + _editingAgentName + '/content', {
-    method: 'PUT', headers: {'Content-Type': 'application/json'},
+    method: 'PUT', headers: saveHdrs,
     body: JSON.stringify({ content: content })
   }).then(r => r.json());
   if (r.ok) {
@@ -534,8 +536,10 @@ async function _confirmCreateAgent() {
   if (!name) { errEl.textContent = 'Name is required'; return; }
   if (!/^[a-z0-9\-]+$/.test(name)) { errEl.textContent = 'Only lowercase letters, numbers, and hyphens allowed'; return; }
   errEl.textContent = '';
+  var hdrs = {'Content-Type':'application/json'};
+  if (_pendingAgentType === 'python') hdrs['X-Confirm'] = 'true';
   var result = await fetch('/api/agents/create', {
-    method:'POST', headers:{'Content-Type':'application/json'},
+    method:'POST', headers:hdrs,
     body:JSON.stringify({name:name, type:_pendingAgentType})
   }).then(r => r.json());
   if (result.ok) {
@@ -556,15 +560,21 @@ window.importAgentFile = async function(input) {
     var name = file.name.replace(/\.(py|md)$/, '').toLowerCase().replace(/\s+/g, '-');
     var type = file.name.endsWith('.py') ? 'python' : 'markdown';
     // Create agent first
-    var r = await fetch('/api/agents/create', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({name:name, type:type}) }).then(r => r.json());
+    var createHdrs = {'Content-Type':'application/json'};
+    if (type === 'python') createHdrs['X-Confirm'] = 'true';
+    var r = await fetch('/api/agents/create', { method:'POST', headers:createHdrs, body:JSON.stringify({name:name, type:type}) }).then(r => r.json());
     if (r.ok) {
       // Write imported content
-      await fetch('/api/agents/' + name + '/content', { method:'PUT', headers:{'Content-Type':'application/json'}, body:JSON.stringify({content:content}) });
+      var importHdrs = {'Content-Type':'application/json'};
+      if (type === 'python') importHdrs['X-Confirm'] = 'true';
+      await fetch('/api/agents/' + name + '/content', { method:'PUT', headers:importHdrs, body:JSON.stringify({content:content}) });
       showToast('Imported ' + file.name, 'success');
       navigate('agents');
     } else if (r.error && r.error.includes('exists')) {
       if (confirm('Agent "' + name + '" already exists. Overwrite?')) {
-        await fetch('/api/agents/' + name + '/content', { method:'PUT', headers:{'Content-Type':'application/json'}, body:JSON.stringify({content:content}) });
+        var overwriteHdrs = {'Content-Type':'application/json'};
+        if (type === 'python') overwriteHdrs['X-Confirm'] = 'true';
+        await fetch('/api/agents/' + name + '/content', { method:'PUT', headers:overwriteHdrs, body:JSON.stringify({content:content}) });
         showToast('Updated ' + name, 'success');
         navigate('agents');
       }

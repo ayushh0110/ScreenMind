@@ -79,8 +79,8 @@ def _log_run(name: str, agent_type: str, status: str, output: str = "", error: s
     if status != "ok" or not output:
         return
 
-    # Parse comma-separated destinations: "local", "obsidian", "webhook", or combos
-    dests = {d.strip().lower() for d in output_dest.split(",")}
+    # Parse comma-separated destinations: "local", "obsidian", "webhook", "webhook:hookname"
+    dests = [d.strip().lower() for d in output_dest.split(",")]
 
     # Local file backup (always runs) — use slug for consistent path
     slug = name.lower().replace(" ", "-")
@@ -90,9 +90,14 @@ def _log_run(name: str, agent_type: str, status: str, output: str = "", error: s
     if "obsidian" in dests:
         _push_to_obsidian(name, output)
 
-    # Webhook (Slack, Discord, custom HTTP endpoints)
-    if "webhook" in dests:
-        _push_to_webhook(name, output)
+    # Webhook routing — supports "webhook" (default) and "webhook:hookname" (named)
+    for dest in dests:
+        if dest == "webhook":
+            _push_to_webhook_v3(name, output, "default")
+        elif dest.startswith("webhook:"):
+            hook_name = dest.split(":", 1)[1].strip()
+            if hook_name:
+                _push_to_webhook_v3(name, output, hook_name)
 
 
 def _save_agent_output(name: str, output: str):
@@ -135,37 +140,13 @@ def _push_to_obsidian(name: str, output: str):
         logger.error(f"Obsidian: Agent push failed: {e}")
 
 
-def _push_to_webhook(name: str, output: str):
-    """Push agent output to configured webhook URL (Slack, Discord, etc.)."""
+def _push_to_webhook_v3(name: str, output: str, hook_name: str = "default"):
+    """Push agent output to a named webhook hook via the unified webhooks module."""
     try:
-        if not settings.webhook_enabled or not settings.webhook_url:
-            return
-
-        import json
-        import urllib.request
-
-        url = settings.webhook_url
-        date_str = datetime.now().strftime("%Y-%m-%d %H:%M")
-
-        # Format payload — compatible with Slack/Discord incoming webhooks
-        payload = {
-            "text": f"*{name}* — {date_str}\n\n{output[:2000]}",
-            "content": f"**{name}** — {date_str}\n\n{output[:2000]}",  # Discord
-            "agent": name,
-            "timestamp": datetime.utcnow().isoformat() + "Z",
-            "source": "screenmind",
-        }
-
-        data = json.dumps(payload).encode("utf-8")
-        req = urllib.request.Request(
-            url, data=data,
-            headers={"Content-Type": "application/json"},
-            method="POST"
-        )
-        urllib.request.urlopen(req, timeout=10)
-        logger.info(f"Webhook: Agent '{name}' output sent")
+        from screenmind.integrations.webhooks import send_to_hook
+        send_to_hook(hook_name, name, output)
     except Exception as e:
-        logger.error(f"Webhook: Agent push failed: {e}")
+        logger.error(f"Webhook: Agent push failed ({hook_name}): {e}")
 
 
 # ── Agent Discovery ──────────────────────────────────────────────────
@@ -440,12 +421,25 @@ The user has set up this agent with the following instructions:
 Now execute the agent's instructions based on this data. Be specific, actionable, and reference actual apps/activities."""
 
     try:
-        result = llm_client.generate(
-            prompt=prompt,
-            temperature=0.3,
-            max_tokens=1024,
-        )
+        from screenmind.engine.llm_client import _cancel_event
+        result = ""
+        for attempt in range(3):
+            if _cancel_event.is_set():
+                raise RuntimeError("Inference cancelled, skipping retry")
+            temp = 0.3 + (attempt * 0.1)
+            result = llm_client.generate(
+                prompt=prompt,
+                temperature=temp,
+                max_tokens=1024,
+            )
+            if result and result.strip():
+                break
+            logger.warning(f"Agent '{agent['name']}' empty output (attempt {attempt+1}/3, temp={temp})")
+        if not result or not result.strip():
+            raise RuntimeError("Gemma returned empty output after 3 attempts")
         return upgrade_hint + result if upgrade_hint else result
+    except RuntimeError:
+        raise  # Let our own errors (empty output, cancellation) through unmodified
     except Exception as e:
         raise RuntimeError(f"Gemma call failed: {e}")
 

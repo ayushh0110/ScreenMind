@@ -25,6 +25,9 @@ class AuthMiddleware(BaseHTTPMiddleware):
 
     OPEN_PATHS = {"/", "/api/auth/verify", "/api/auth/status", "/api/auth/setup-complete", "/api/status"}
     OPEN_PREFIXES = ("/css/", "/js/", "/api/auth/")
+    # Internal paths — only accessible from localhost (agents, MCP, SDK)
+    LOCALHOST_ONLY_PREFIXES = ("/api/agents/sdk/", "/api/timeline")
+    LOCALHOST_ONLY_PATHS = {"/api/capture/bookmark"}
 
     async def dispatch(self, request: Request, call_next):
         # No PIN set — everything is open
@@ -33,9 +36,16 @@ class AuthMiddleware(BaseHTTPMiddleware):
 
         path = request.url.path
 
-        # Allow open paths
+        # Allow open paths (no auth required from anywhere)
         if path in self.OPEN_PATHS or any(path.startswith(p) for p in self.OPEN_PREFIXES):
             return await call_next(request)
+
+        # Localhost-only paths — SDK, timeline, bookmark (agents/MCP use these internally)
+        if path in self.LOCALHOST_ONLY_PATHS or any(path.startswith(p) for p in self.LOCALHOST_ONLY_PREFIXES):
+            client_host = request.client.host if request.client else None
+            if client_host in ("127.0.0.1", "::1"):
+                return await call_next(request)
+            return JSONResponse({"error": "unauthorized", "locked": True}, status_code=401)
 
         # Check session cookie
         token = request.cookies.get("screenmind_session")

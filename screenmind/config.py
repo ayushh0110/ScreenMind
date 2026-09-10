@@ -78,6 +78,7 @@ _ALLOWED_OVERRIDES = {
     "obsidian_enabled", "obsidian_vault_path",
     "notion_enabled", "notion_token", "notion_database_id",
     "webhook_enabled", "webhook_url", "webhook_events", "webhook_secret", "webhook_headers",
+    "webhook_extra",
     "smart_notifications", "distraction_minutes", "break_reminder_minutes",
     "auto_bookmark", "auto_bookmark_keywords",
     "agents_enabled", "agents_auto_run_python",
@@ -240,6 +241,7 @@ class Settings(BaseSettings):
     webhook_events: str = Field(default="daily_summary,bookmark,meeting_end", description="Comma-separated event types")
     webhook_secret: str = Field(default="", description="Optional HMAC secret for webhook signing")
     webhook_headers: str = Field(default="", description="Custom headers as Key: Value lines")
+    webhook_extra: str = Field(default="[]", description="JSON array of extra named webhook profiles")
 
     # ── Smart Notifications ──────────────────────────────────────────────
     smart_notifications: bool = Field(default=True, description="Enable smart usage notifications")

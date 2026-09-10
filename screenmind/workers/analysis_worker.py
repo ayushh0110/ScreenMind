@@ -586,16 +586,15 @@ class AnalysisWorker:
                         logger.info(f"Bookmarked #{activity_id} (matched: '{kw}')")
                         # Fire webhook
                         try:
-                            if settings.webhook_enabled and settings.webhook_url:
-                                from screenmind.integrations.webhooks import fire
-                                fire("bookmark", {
-                                    "activity_id": activity_id,
-                                    "timestamp": str(capture.timestamp),
-                                    "app_name": analysis.app_name,
-                                    "summary": analysis.activity_summary,
-                                    "keyword": kw,
-                                    "auto": True,
-                                }, settings.webhook_url, settings.webhook_secret, settings.webhook_events, settings.webhook_headers)
+                            from screenmind.integrations.webhooks import fire_all
+                            fire_all("bookmark", {
+                                "activity_id": activity_id,
+                                "timestamp": str(capture.timestamp),
+                                "app_name": analysis.app_name,
+                                "summary": analysis.activity_summary,
+                                "keyword": kw,
+                                "auto": True,
+                            })
                         except Exception:
                             pass
                         break
