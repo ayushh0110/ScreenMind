@@ -291,6 +291,12 @@ def _make_record(**kwargs):
 class TestReconcileAppName:
     """Test the 4-level hierarchy for app name resolution."""
 
+    @pytest.fixture(autouse=True)
+    def _os_name_not_trusted(self, monkeypatch):
+        # These scenarios use Windows/Linux-style process names and titles.
+        # macOS resolves the OS owner first; see TestReconcileAppNameMacOS.
+        monkeypatch.setattr("screenmind.engine.analyzer._os_app_name_is_trusted", lambda: False)
+
     def test_scenario_1_alacritty_misidentified(self, analyzer):
         """Alacritty (terminal) misidentified as VS Code."""
         record = _make_record(app_name="VS Code", activity_category="coding")
@@ -435,6 +441,68 @@ class TestReconcileAppName:
                                      window_title="Build Log - Jenkins")
         assert result.app_name == "Jenkins"  # L1 extracts from title
         assert result.activity_category == "browsing"  # Browser: trusts Gemma
+
+
+class TestReconcileAppNameMacOS:
+    """Where the adapter trusts the OS app name (macOS), it wins over title parsing."""
+
+    @pytest.fixture(autouse=True)
+    def _os_name_trusted(self, monkeypatch):
+        monkeypatch.setattr("screenmind.engine.analyzer._os_app_name_is_trusted", lambda: True)
+
+    def test_terminal_title_suffix_ignored(self, analyzer):
+        """Terminal titles end in the window size, not the app name."""
+        record = _make_record(app_name="Terminal", activity_category="terminal")
+        result = analyzer._normalize(record, app_name_hint="Terminal",
+                                     window_title="ScreenMind — python — 120×30")
+        assert result.app_name == "Terminal"
+        assert result.activity_category == "terminal"
+
+    def test_owner_beats_title_segment(self, analyzer):
+        record = _make_record(app_name="Slack", activity_category="communication")
+        result = analyzer._normalize(record, app_name_hint="Slack",
+                                     window_title="general (Channel) - TripleTen - Slack")
+        assert result.app_name == "Slack"
+
+    def test_no_owner_falls_back_to_title(self, analyzer):
+        record = _make_record(app_name="Code", activity_category="coding")
+        result = analyzer._normalize(record, app_name_hint=None,
+                                     window_title="main.py - Visual Studio Code")
+        assert result.app_name == "Visual Studio Code"
+
+
+class TestTrustsOsAppName:
+    """The platform layer decides whether the OS app name is trusted."""
+
+    def test_base_default_false(self):
+        from screenmind.platform_support.base import PlatformAdapter
+        assert PlatformAdapter.trusts_os_app_name.fget(object()) is False
+
+    def test_macos_true(self):
+        from screenmind.platform_support.macos import MacOSAdapter
+        assert MacOSAdapter.trusts_os_app_name.fget(object()) is True
+
+    def test_windows_and_linux_inherit_false(self):
+        from screenmind.platform_support.windows import WindowsAdapter
+        from screenmind.platform_support.linux import LinuxAdapter
+        from screenmind.platform_support.base import PlatformAdapter
+        assert WindowsAdapter.trusts_os_app_name is PlatformAdapter.trusts_os_app_name
+        assert LinuxAdapter.trusts_os_app_name is PlatformAdapter.trusts_os_app_name
+
+    def test_analyzer_reads_adapter(self, monkeypatch):
+        import screenmind.engine.analyzer as analyzer
+        fake = type("A", (), {"trusts_os_app_name": True})()
+        monkeypatch.setattr(analyzer, "platform_adapter", lambda: fake)
+        assert analyzer._os_app_name_is_trusted() is True
+        fake.trusts_os_app_name = False
+        assert analyzer._os_app_name_is_trusted() is False
+
+    def test_analyzer_adapter_error_means_untrusted(self, monkeypatch):
+        import screenmind.engine.analyzer as analyzer
+        def boom():
+            raise RuntimeError("no adapter")
+        monkeypatch.setattr(analyzer, "platform_adapter", boom)
+        assert analyzer._os_app_name_is_trusted() is False
 
 
 class TestBackwardCompatibility:
