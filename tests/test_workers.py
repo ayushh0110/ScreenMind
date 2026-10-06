@@ -174,3 +174,33 @@ class TestURLExtraction:
         from screenmind.workers.analysis_worker import _extract_all_urls
         urls = _extract_all_urls("See https://example.com/page.")
         assert urls[0] == "https://example.com/page"
+
+
+class TestAnalysisWorkerBackfill:
+    """Backfill re-analyzes rows that were never analyzed."""
+
+    async def test_backfill_passes_detected_app_as_hint(self, db, tmp_path):
+        """Unanalyzed rows have app_name NULL; the OS-detected app must be used."""
+        from PIL import Image
+        from screenmind.storage.models import ScreenshotEntry
+        from screenmind.workers.analysis_worker import AnalysisWorker
+
+        shot = tmp_path / "shot.jpg"
+        Image.new("RGB", (64, 64), "white").save(shot)
+        db.insert_activity(ScreenshotEntry(
+            timestamp=datetime.now(),
+            screenshot_path=str(shot),
+            window_title="Chats",
+            detected_app_name="Telegram",
+            bookmarked=False,
+            analyzed=False,
+        ))
+
+        worker = AnalysisWorker(queue=asyncio.Queue(maxsize=100), database=db)
+        worker._process = AsyncMock()
+        await worker._backfill_skipped()
+
+        worker._process.assert_awaited_once()
+        capture = worker._process.await_args.args[0]
+        assert capture.app_name == "Telegram"
+        assert capture.window_title == "Chats"
