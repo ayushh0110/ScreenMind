@@ -45,7 +45,7 @@ class MacOSAdapter(PlatformAdapter):
         return "macOS"
 
     def _front_window(self) -> Optional[dict]:
-        """Return the frontmost normal window from Quartz (owner, pid, title).
+        """Return the frontmost normal window from Quartz (owner, pid, title, bounds).
 
         NSWorkspace.frontmostApplication() goes stale in a process without an
         NSRunLoop, so we read the live on-screen window list instead. It is
@@ -68,6 +68,10 @@ class MacOSAdapter(PlatformAdapter):
                     "owner": w.get("kCGWindowOwnerName"),
                     "pid": w.get("kCGWindowOwnerPID"),
                     "title": w.get("kCGWindowName") or None,
+                    "bounds": (
+                        int(bounds.get("X", 0)), int(bounds.get("Y", 0)),
+                        int(bounds["Width"]), int(bounds["Height"]),
+                    ),
                 }
         except Exception as e:
             logger.debug(f"Quartz window lookup failed: {e}")
@@ -89,6 +93,11 @@ class MacOSAdapter(PlatformAdapter):
         """Get the app that owns the frontmost window."""
         front = self._front_window()
         return front["owner"] if front else None
+
+    def get_active_window_bounds(self) -> Optional[Tuple[int, int, int, int]]:
+        """Frontmost window as (x, y, width, height) in global screen points."""
+        front = self._front_window()
+        return front["bounds"] if front else None
 
     # ── Accessibility ────────────────────────────────────────────────
 

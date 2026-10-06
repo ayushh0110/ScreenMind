@@ -163,33 +163,14 @@ class ScreenCapture:
         return None
 
     def _window_center_macos(self) -> Optional[Tuple[int, int]]:
-        """macOS: use Quartz to get frontmost window bounds.
+        """macOS: center of the frontmost window, from the platform adapter."""
+        from screenmind.platform_support import adapter
 
-        The window list is ordered front to back, so the first layer-0 window
-        is the active one. (NSWorkspace.frontmostApplication() goes stale in a
-        process without an NSRunLoop, so we don't use it to pick the app.)
-        """
-        from Quartz import (  # type: ignore
-            CGWindowListCopyWindowInfo,
-            kCGWindowListOptionOnScreenOnly,
-            kCGWindowListExcludeDesktopElements,
-            kCGNullWindowID,
-        )
-
-        windows = CGWindowListCopyWindowInfo(
-            kCGWindowListOptionOnScreenOnly | kCGWindowListExcludeDesktopElements,
-            kCGNullWindowID,
-        )
-        for win in windows or []:
-            if win.get("kCGWindowLayer", -1) == 0:
-                bounds = win.get("kCGWindowBounds", {})
-                x = int(bounds.get("X", 0))
-                y = int(bounds.get("Y", 0))
-                w = int(bounds.get("Width", 0))
-                h = int(bounds.get("Height", 0))
-                if w > 0 and h > 0:
-                    return x + w // 2, y + h // 2
-        return None
+        bounds = adapter().get_active_window_bounds()
+        if not bounds:
+            return None
+        x, y, w, h = bounds
+        return x + w // 2, y + h // 2
 
     def _select_monitor(self) -> dict:
         """Pick the monitor to capture based on settings."""

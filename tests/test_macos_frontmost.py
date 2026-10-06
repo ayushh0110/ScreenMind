@@ -78,3 +78,36 @@ def test_no_windows(fake_quartz, adapter):
     assert adapter.get_active_app_name() is None
     assert adapter.get_active_window_title() is None
     assert adapter.get_foreground_window_handle() is None
+
+
+def test_window_bounds(fake_quartz, adapter):
+    fake_quartz.windows = [
+        _win("Rectangle", "", 3, w=10, h=10),
+        {**_win("Slack", "general", 42), "kCGWindowBounds": {"X": 100, "Y": 50, "Width": 800, "Height": 600}},
+    ]
+    assert adapter.get_active_window_bounds() == (100, 50, 800, 600)
+
+
+def test_window_bounds_none_without_windows(fake_quartz, adapter):
+    fake_quartz.windows = []
+    assert adapter.get_active_window_bounds() is None
+
+
+def test_base_adapter_bounds_default_none():
+    """Windows/Linux adapters inherit the default and report no bounds."""
+    from screenmind.platform_support.base import PlatformAdapter
+    assert PlatformAdapter.get_active_window_bounds(object()) is None
+
+
+def test_screen_capture_window_center_uses_adapter(monkeypatch):
+    """ScreenCapture picks the monitor from the adapter's frontmost window."""
+    from screenmind.capture.screen import ScreenCapture
+    import screenmind.platform_support as ps
+
+    fake = type("A", (), {"get_active_window_bounds": lambda self: (100, 50, 800, 600)})()
+    monkeypatch.setattr(ps, "adapter", lambda: fake)
+    cap = ScreenCapture.__new__(ScreenCapture)  # skip mss setup
+    assert cap._window_center_macos() == (500, 350)
+
+    fake.get_active_window_bounds = lambda: None
+    assert cap._window_center_macos() is None
