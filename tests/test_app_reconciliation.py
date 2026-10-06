@@ -291,6 +291,12 @@ def _make_record(**kwargs):
 class TestReconcileAppName:
     """Test the 4-level hierarchy for app name resolution."""
 
+    @pytest.fixture(autouse=True)
+    def _non_macos(self, monkeypatch):
+        # These scenarios use Windows/Linux-style process names and titles.
+        # macOS resolves the OS owner first; see TestReconcileAppNameMacOS.
+        monkeypatch.setattr("screenmind.engine.analyzer.sys.platform", "win32")
+
     def test_scenario_1_alacritty_misidentified(self, analyzer):
         """Alacritty (terminal) misidentified as VS Code."""
         record = _make_record(app_name="VS Code", activity_category="coding")
@@ -435,6 +441,34 @@ class TestReconcileAppName:
                                      window_title="Build Log - Jenkins")
         assert result.app_name == "Jenkins"  # L1 extracts from title
         assert result.activity_category == "browsing"  # Browser: trusts Gemma
+
+
+class TestReconcileAppNameMacOS:
+    """On macOS the Quartz window owner wins over title parsing."""
+
+    @pytest.fixture(autouse=True)
+    def _macos(self, monkeypatch):
+        monkeypatch.setattr("screenmind.engine.analyzer.sys.platform", "darwin")
+
+    def test_terminal_title_suffix_ignored(self, analyzer):
+        """Terminal titles end in the window size, not the app name."""
+        record = _make_record(app_name="Terminal", activity_category="terminal")
+        result = analyzer._normalize(record, app_name_hint="Terminal",
+                                     window_title="ScreenMind — python — 120×30")
+        assert result.app_name == "Terminal"
+        assert result.activity_category == "terminal"
+
+    def test_owner_beats_title_segment(self, analyzer):
+        record = _make_record(app_name="Slack", activity_category="communication")
+        result = analyzer._normalize(record, app_name_hint="Slack",
+                                     window_title="general (Channel) - TripleTen - Slack")
+        assert result.app_name == "Slack"
+
+    def test_no_owner_falls_back_to_title(self, analyzer):
+        record = _make_record(app_name="Code", activity_category="coding")
+        result = analyzer._normalize(record, app_name_hint=None,
+                                     window_title="main.py - Visual Studio Code")
+        assert result.app_name == "Visual Studio Code"
 
 
 class TestBackwardCompatibility:

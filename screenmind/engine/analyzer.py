@@ -17,6 +17,7 @@ import logging
 import io
 import json
 import re
+import sys
 import time
 from pathlib import Path
 from typing import Optional
@@ -735,8 +736,14 @@ class GemmaAnalyzer:
         # ── Phase 1: Walk the hierarchy to find best app name ────────
         resolved_name = None
 
+        # macOS: the window owner from Quartz is ground truth, and titles rarely
+        # end with the app name (Terminal: "dir — cmd — 120×30"), so use it first.
+        if sys.platform == "darwin" and app_name_hint:
+            if app_name_hint.lower().strip() not in GENERIC_PROCESS_NAMES:
+                resolved_name = app_name_hint
+
         # L1: Title " - " extraction ("main.py - Visual Studio Code" → "Visual Studio Code")
-        title_app = _extract_app_from_title(window_title)
+        title_app = None if resolved_name else _extract_app_from_title(window_title)
         if title_app:
             resolved_name = title_app
 
