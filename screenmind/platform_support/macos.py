@@ -44,60 +44,51 @@ class MacOSAdapter(PlatformAdapter):
     def platform_name(self) -> str:
         return "macOS"
 
-    def get_foreground_window_handle(self) -> Optional[int]:
-        """macOS doesn't use integer window handles like Win32. Returns PID instead."""
+    def _front_window(self) -> Optional[dict]:
+        """Return the frontmost normal window from Quartz (owner, pid, title).
+
+        NSWorkspace.frontmostApplication() goes stale in a process without an
+        NSRunLoop, so we read the live on-screen window list instead. It is
+        ordered front to back; layer 0 is the normal app window layer.
+        kCGWindowName needs Screen Recording permission, else it is empty.
+        """
         try:
-            if self._appkit_available:
-                from AppKit import NSWorkspace  # type: ignore
-                active = NSWorkspace.sharedWorkspace().frontmostApplication()
-                return active.processIdentifier() if active else None
-        except Exception:
-            pass
+            import Quartz  # type: ignore
+            windows = Quartz.CGWindowListCopyWindowInfo(
+                Quartz.kCGWindowListOptionOnScreenOnly | Quartz.kCGWindowListExcludeDesktopElements,
+                Quartz.kCGNullWindowID,
+            ) or []
+            for w in windows:
+                if w.get("kCGWindowLayer", 1) != 0:
+                    continue
+                bounds = w.get("kCGWindowBounds") or {}
+                if bounds.get("Width", 0) < 50 or bounds.get("Height", 0) < 50:
+                    continue
+                return {
+                    "owner": w.get("kCGWindowOwnerName"),
+                    "pid": w.get("kCGWindowOwnerPID"),
+                    "title": w.get("kCGWindowName") or None,
+                }
+        except Exception as e:
+            logger.debug(f"Quartz window lookup failed: {e}")
         return None
 
+    def get_foreground_window_handle(self) -> Optional[int]:
+        """macOS doesn't use integer window handles like Win32. Returns PID instead."""
+        front = self._front_window()
+        return front["pid"] if front else None
+
     def get_active_window_title(self) -> Optional[str]:
-        """Get active window title using AppKit or osascript fallback."""
-        # Method 1: AppKit
-        if self._appkit_available:
-            try:
-                from AppKit import NSWorkspace  # type: ignore
-                active = NSWorkspace.sharedWorkspace().frontmostApplication()
-                if active:
-                    return active.localizedName()
-            except Exception:
-                pass
-
-        # Method 2: osascript fallback
-        try:
-            result = subprocess.run(
-                ["osascript", "-e",
-                 'tell application "System Events" to get name of first application process whose frontmost is true'],
-                capture_output=True, text=True, timeout=3
-            )
-            if result.returncode == 0 and result.stdout.strip():
-                return result.stdout.strip()
-        except Exception:
-            pass
-
+        """Get the frontmost window's title, falling back to the app name."""
+        front = self._front_window()
+        if front:
+            return front["title"] or front["owner"]
         return None
 
     def get_active_app_name(self) -> Optional[str]:
-        """Get active app name. On macOS, same as window title source."""
-        if self._appkit_available:
-            try:
-                from AppKit import NSWorkspace  # type: ignore
-                active = NSWorkspace.sharedWorkspace().frontmostApplication()
-                if active:
-                    return active.localizedName()
-            except Exception:
-                pass
-
-        # Fallback
-        title = self.get_active_window_title()
-        if title:
-            parts = title.rsplit(" - ", 1)
-            return parts[-1] if parts else title
-        return None
+        """Get the app that owns the frontmost window."""
+        front = self._front_window()
+        return front["owner"] if front else None
 
     # ── Accessibility ────────────────────────────────────────────────
 
