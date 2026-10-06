@@ -647,7 +647,7 @@ class AnalysisWorker:
         try:
             conn = self._db._get_conn()
             row = conn.execute(
-                """SELECT id, screenshot_path, window_title, app_name, ocr_text, ocr_boxes
+                """SELECT id, screenshot_path, window_title, COALESCE(detected_app, app_name), ocr_text, ocr_boxes
                    FROM activities
                    WHERE status IN ('pending', 'skipped', 'failed')
                      AND DATE(timestamp) = DATE('now', 'localtime')
