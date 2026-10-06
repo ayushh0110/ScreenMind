@@ -52,3 +52,13 @@ class PlatformAdapter(ABC):
     def platform_name(self) -> str:
         """Human-readable platform name."""
         return "Unknown"
+
+    @property
+    def trusts_os_app_name(self) -> bool:
+        """Whether get_active_app_name() is a better app identity than the window title.
+
+        False by default: on Windows the process name is an exe like "chrome.exe",
+        and titles follow "<content> - <App>". Adapters whose OS reports a clean,
+        user-facing app name override this to True.
+        """
+        return False

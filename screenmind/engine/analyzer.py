@@ -17,7 +17,6 @@ import logging
 import io
 import json
 import re
-import sys
 import time
 from pathlib import Path
 from typing import Optional
@@ -26,6 +25,7 @@ from PIL import Image
 
 from screenmind.config import settings
 from screenmind.engine import llm_client
+from screenmind.platform_support import adapter as platform_adapter
 from screenmind.storage.models import ActivityRecord
 
 logger = logging.getLogger("screenmind.engine.analyzer")
@@ -135,6 +135,14 @@ _BROWSER_PROCESS_NAMES = frozenset({
     "brave", "opera", "safari", "vivaldi", "arc",
     "msedge",  # Also in GENERIC_PROCESS_NAMES — intentional overlap
 })
+
+
+def _os_app_name_is_trusted() -> bool:
+    """Ask the platform adapter whether the OS app name beats title parsing."""
+    try:
+        return platform_adapter().trusts_os_app_name
+    except Exception:
+        return False
 
 
 def _extract_app_from_title(window_title: Optional[str]) -> Optional[str]:
@@ -715,6 +723,7 @@ class GemmaAnalyzer:
         """Normalize fields and reconcile app identity using three signals.
 
         Hierarchy for app name (first non-empty wins, then compared with Gemma):
+          L0: OS process name, only where the platform adapter trusts it (macOS)
           L1: Title " - " extraction  (most reliable pattern)
           L2: OS process name         (ground truth, skip generic wrappers)
           L3: Title simple extraction  (short clean title, for OS=None/generic)
@@ -736,9 +745,8 @@ class GemmaAnalyzer:
         # ── Phase 1: Walk the hierarchy to find best app name ────────
         resolved_name = None
 
-        # macOS: the window owner from Quartz is ground truth, and titles rarely
-        # end with the app name (Terminal: "dir — cmd — 120×30"), so use it first.
-        if sys.platform == "darwin" and app_name_hint:
+        # L0: platforms with a clean OS app name (macOS) use it before title parsing
+        if app_name_hint and _os_app_name_is_trusted():
             if app_name_hint.lower().strip() not in GENERIC_PROCESS_NAMES:
                 resolved_name = app_name_hint
 

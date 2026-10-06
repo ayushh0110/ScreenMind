@@ -104,6 +104,12 @@ class MacOSAdapter(PlatformAdapter):
     def is_a11y_available(self) -> bool:
         return self._ax_available
 
+    @property
+    def trusts_os_app_name(self) -> bool:
+        """The window owner name ("Terminal", "Google Chrome") is user-facing, while
+        titles rarely end with the app name (Terminal: "dir — cmd — 120×30")."""
+        return True
+
     def extract_a11y_text(self, hwnd: Optional[int] = None) -> Tuple[Optional[str], str]:
         """
         Extract accessible text using macOS Accessibility API (AXUIElement).
