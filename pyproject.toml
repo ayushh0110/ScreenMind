@@ -62,6 +62,10 @@ dependencies = [
     # Encryption (optional but included by default)
     "cryptography>=41.0,<50.0",
     "keyring>=23.0",
+
+    # macOS window detection (Quartz) + accessibility text (AXUIElement)
+    "pyobjc-framework-Quartz>=10.0; sys_platform == 'darwin'",
+    "pyobjc-framework-ApplicationServices>=10.0; sys_platform == 'darwin'",
 ]
 
 [project.optional-dependencies]

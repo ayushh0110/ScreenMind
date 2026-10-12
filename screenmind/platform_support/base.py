@@ -28,6 +28,10 @@ class PlatformAdapter(ABC):
         """Get the native window handle of the focused window."""
         ...
 
+    def get_active_window_bounds(self) -> Optional[Tuple[int, int, int, int]]:
+        """Focused window as (x, y, width, height), or None if not supported."""
+        return None
+
     @abstractmethod
     def extract_a11y_text(self, hwnd: Optional[int] = None) -> Tuple[Optional[str], str]:
         """
