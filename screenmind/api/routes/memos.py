@@ -1,7 +1,5 @@
 """Voice Memos routes — list and serve voice memos."""
 
-from pathlib import Path
-
 from fastapi import APIRouter, HTTPException, Query
 from fastapi.responses import FileResponse
 
@@ -44,13 +42,17 @@ async def list_memos(
 @router.get("/{memo_id}/audio")
 async def get_memo_audio(memo_id: int):
     """Serve the WAV audio file for a voice memo."""
+    from screenmind.engine.voice_memo import memo_wav_path
+
     activity = db.get_activity_by_id(memo_id)
-    if not activity or (activity.get("app_name") != "Voice Memo" and activity.get("detected_app") != "Voice Memo"):
+    if not activity:
         raise HTTPException(status_code=404, detail="Memo not found")
 
-    # WAV path stored in details field
-    wav_path = activity.get("details", "")
-    if not wav_path or not Path(wav_path).exists():
+    # WAV path stored in details field — only served from the memos directory
+    wav_path = memo_wav_path(activity.get("details"))
+    if wav_path is None:
+        raise HTTPException(status_code=404, detail="Memo not found")
+    if not wav_path.exists():
         raise HTTPException(status_code=404, detail="Audio file not found")
 
-    return FileResponse(wav_path, media_type="audio/wav")
+    return FileResponse(str(wav_path), media_type="audio/wav")

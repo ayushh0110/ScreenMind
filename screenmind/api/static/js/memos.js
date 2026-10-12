@@ -83,8 +83,8 @@ async function loadMemos(date) {
             '<button class="menu-item bookmark-item ' + bookmarkClass + '" onclick="event.stopPropagation(); toggleMemoBookmark(' + m.id + ', this)">' +
               '<span class="menu-icon">' + (m.bookmarked ? '★' : '☆') + '</span> ' + bookmarkLabel +
             '</button>' +
-            '<button class="menu-item reanalyze-item" onclick="event.stopPropagation(); reanalyzeActivity(' + m.id + ', this)">' +
-              '<span class="menu-icon">↻</span> Re-analyze' +
+            '<button class="menu-item reanalyze-item" onclick="event.stopPropagation(); retranscribeMemo(' + m.id + ', this)">' +
+              '<span class="menu-icon">↻</span> Re-transcribe' +
             '</button>' +
             '<div class="menu-divider"></div>' +
             '<button class="menu-item delete-item" onclick="event.stopPropagation(); deleteMemo(' + m.id + ', this)">' +
@@ -134,6 +134,20 @@ window.seekMemo = function(scrub) {
 };
 
 // ── Memo Actions (three-dot menu) ────────────────────────
+window.retranscribeMemo = async function(id, el) {
+  el.closest('.card-menu').classList.remove('open');
+  el.closest('.card-menu-wrap').querySelector('.card-menu-trigger').classList.remove('active');
+  showToast('↻ Re-transcribing voice memo...', 'info');
+  try {
+    await _postReanalyze(id);
+    showToast('✓ Transcript updated!', 'success');
+    var dateEl = document.getElementById('memo-date');
+    if (dateEl) loadMemos(dateEl.value);
+  } catch (err) {
+    showToast('Re-transcription failed: ' + err.message, 'warning');
+  }
+};
+
 window.toggleMemoBookmark = async function(id, el) {
   try {
     var r = await fetch('/api/activities/' + id + '/bookmark', { method: 'PUT' });

@@ -191,16 +191,25 @@ window.toggleBookmark = async function(id, el) {
 window.reanalyzeActivity = async function(id, el) {
   el.closest('.card-menu').classList.remove('open');
   el.closest('.card-menu-wrap').querySelector('.card-menu-trigger').classList.remove('active');
-  showToast('↻ Re-analyzing screenshot...', 'info');
+  showToast('↻ Re-analyzing...', 'info');
   try {
-    const r = await fetch(`/api/activities/${id}/reanalyze`, { method: 'POST' });
-    if (!r.ok) throw new Error('Failed');
+    await _postReanalyze(id);
     showToast('✓ Re-analysis complete!', 'success');
     loadTimeline(true);
   } catch (err) {
     showToast('Re-analysis failed: ' + err.message, 'warning');
   }
 };
+
+// POST /reanalyze and surface the server's error detail (e.g. "Audio file not found")
+async function _postReanalyze(id) {
+  const r = await fetch(`/api/activities/${id}/reanalyze`, { method: 'POST' });
+  if (!r.ok) {
+    const body = await r.json().catch(() => ({}));
+    throw new Error(body.detail || `HTTP ${r.status}`);
+  }
+  return r.json();
+}
 
 window.deleteActivity = async function(id, btn) {
   if (!btn.classList.contains('confirm-delete')) {

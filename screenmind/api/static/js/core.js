@@ -213,8 +213,12 @@ window.openModal = async function(src, activityId) {
           </div>
         </div>
         ${a.active_url ? `<div style="margin-top:6px"><a href="${a.active_url}" target="_blank" rel="noopener" style="font-size:0.75rem;color:#60a5fa;text-decoration:none;word-break:break-all;display:inline-flex;align-items:center;gap:4px" title="${a.active_url}">🔗 ${a.active_url.length > 80 ? a.active_url.substring(0, 80) + '…' : a.active_url}</a></div>` : ''}`;
-      // Modal shows detailed context (timeline cards already show the short summary)
-      $('#modal-summary').textContent = a.details || a.summary || 'No analysis yet';
+      // Modal shows detailed context (timeline cards already show the short summary).
+      // Voice memos keep the WAV path in `details` and the full transcript in `ocr_text`.
+      const isMemo = typeof a.details === 'string' && a.details.toLowerCase().endsWith('.wav');
+      $('#modal-summary').textContent = isMemo
+        ? (a.ocr_text || a.summary || 'No transcript yet')
+        : (a.details || a.summary || 'No analysis yet');
 
       $('#modal-ocr').textContent = a.scene_description || 'No scene description yet';
     } catch { $('#modal-summary').textContent = 'Unable to load details'; }
