@@ -101,6 +101,12 @@ def chat(
         "messages": messages,
         "temperature": temperature,
         "max_tokens": max_tokens,
+        # Reuse the KV cache for the shared prompt prefix (system prompt,
+        # analysis instructions) instead of re-processing it every request.
+        # Recent llama-server builds default to this; older or external
+        # servers may not. This is the only HTTP path to llama-server —
+        # generate(), chat_with_images() and transcribe_audio() all call chat().
+        "cache_prompt": True,
     }
 
     # Create a dedicated client for this request so it can be closed independently

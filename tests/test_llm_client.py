@@ -102,6 +102,26 @@ class TestChat:
         assert payload["messages"] == messages
         assert payload["temperature"] == 0.5
         assert payload["max_tokens"] == 512
+        assert payload["cache_prompt"] is True
+
+    @patch("screenmind.engine.llm_client.httpx.Client")
+    def test_cache_prompt_sent_from_every_entry_point(self, mock_client_cls):
+        """generate(), chat_with_images() and transcribe_audio() all reach
+        llama-server through chat(), so all of them send cache_prompt."""
+        from screenmind.engine.llm_client import chat_with_images, transcribe_audio
+        mock_resp = MagicMock()
+        mock_resp.json.return_value = {"choices": [{"message": {"content": "ok"}}]}
+        mock_resp.raise_for_status = MagicMock()
+        post = mock_client_cls.return_value.post
+        post.return_value = mock_resp
+
+        generate("summarize my day")
+        chat_with_images("describe", [b"\xff\xd8jpeg"])
+        with patch("screenmind.engine.model_manager.is_audio_capable", return_value=True):
+            transcribe_audio(b"RIFFwav")
+
+        assert post.call_count == 3
+        assert all(c[1]["json"]["cache_prompt"] is True for c in post.call_args_list)
 
     @patch("screenmind.engine.llm_client.httpx.Client")
     def test_chat_raises_on_http_error(self, mock_client_cls):
