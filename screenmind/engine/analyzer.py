@@ -25,7 +25,6 @@ from PIL import Image
 
 from screenmind.config import settings
 from screenmind.engine import llm_client
-from screenmind.platform_support import adapter as platform_adapter
 from screenmind.storage.models import ActivityRecord
 
 logger = logging.getLogger("screenmind.engine.analyzer")
@@ -140,6 +139,8 @@ _BROWSER_PROCESS_NAMES = frozenset({
 def _os_app_name_is_trusted() -> bool:
     """Ask the platform adapter whether the OS app name beats title parsing."""
     try:
+        # Imported lazily so the analyzer stays platform-agnostic until needed
+        from screenmind.platform_support import adapter as platform_adapter
         return platform_adapter().trusts_os_app_name
     except Exception:
         return False
@@ -751,9 +752,10 @@ class GemmaAnalyzer:
                 resolved_name = app_name_hint
 
         # L1: Title " - " extraction ("main.py - Visual Studio Code" → "Visual Studio Code")
-        title_app = None if resolved_name else _extract_app_from_title(window_title)
-        if title_app:
-            resolved_name = title_app
+        if not resolved_name:
+            title_app = _extract_app_from_title(window_title)
+            if title_app:
+                resolved_name = title_app
 
         # L2: OS process name (skip generic wrappers like 'electron', 'java')
         if not resolved_name and app_name_hint:

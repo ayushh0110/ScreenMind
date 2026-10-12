@@ -490,18 +490,21 @@ class TestTrustsOsAppName:
         assert LinuxAdapter.trusts_os_app_name is PlatformAdapter.trusts_os_app_name
 
     def test_analyzer_reads_adapter(self, monkeypatch):
+        # The analyzer imports the adapter lazily, so patch it at the source
         import screenmind.engine.analyzer as analyzer
+        import screenmind.platform_support as ps
         fake = type("A", (), {"trusts_os_app_name": True})()
-        monkeypatch.setattr(analyzer, "platform_adapter", lambda: fake)
+        monkeypatch.setattr(ps, "adapter", lambda: fake)
         assert analyzer._os_app_name_is_trusted() is True
         fake.trusts_os_app_name = False
         assert analyzer._os_app_name_is_trusted() is False
 
     def test_analyzer_adapter_error_means_untrusted(self, monkeypatch):
         import screenmind.engine.analyzer as analyzer
+        import screenmind.platform_support as ps
         def boom():
             raise RuntimeError("no adapter")
-        monkeypatch.setattr(analyzer, "platform_adapter", boom)
+        monkeypatch.setattr(ps, "adapter", boom)
         assert analyzer._os_app_name_is_trusted() is False
 
 
