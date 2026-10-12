@@ -6,6 +6,8 @@ transcribes with Gemma 4's native audio encoder, and generates meeting summaries
 
 import io
 import logging
+import subprocess
+import sys
 import time
 import threading
 import wave
@@ -38,15 +40,68 @@ PROBE_CONFIRM_COUNT = 2      # require N consecutive voice-detected probes befor
 PROBE_CONFIRM_WINDOW = 20    # probes must happen within N seconds to count as consecutive
 
 
-# Map meeting app keywords → native process names
-# Browser-based apps (Meet, web Teams) have no entry → fall back to timeout only
-_APP_TO_PROCESS = {
-    "discord": "Discord.exe",
-    "zoom": "Zoom.exe",
-    "teams": "ms-teams.exe",
-    "webex": "webexmta.exe",
-    "slack": "slack.exe",
+# Re-check llama-server this often while transcription is unavailable, so
+# meeting transcription recovers when the server starts after ScreenMind.
+AVAILABILITY_RECHECK_SECONDS = 30
+
+
+# Map meeting app keywords → native process names, per platform.
+# Browser-based meetings (Meet, web Teams) have no process → timeout only.
+# Matching is exact on the executable's base name (case-insensitive), so an
+# editor with "discord" in a file path never counts as Discord running.
+_MEETING_PROCESSES = {
+    "win32": {
+        "discord": ["Discord.exe"],
+        "zoom": ["Zoom.exe"],
+        "teams": ["ms-teams.exe"],
+        "webex": ["webexmta.exe"],
+        "slack": ["slack.exe"],
+    },
+    "darwin": {
+        "discord": ["Discord"],
+        "zoom": ["zoom.us"],
+        "teams": ["MSTeams", "Microsoft Teams"],
+        "webex": ["Webex"],
+        "slack": ["Slack"],
+    },
+    "linux": {  # Linux truncates process names to 15 chars; all fit
+        "discord": ["Discord", "discord"],
+        "zoom": ["zoom"],
+        "teams": ["teams", "teams-for-linux"],
+        "webex": ["webex"],
+        "slack": ["slack"],
+    },
 }
+
+
+def _meeting_process_names(app_name: str) -> Optional[List[str]]:
+    """Native process names to watch for a meeting app, or None if unknown."""
+    table = _MEETING_PROCESSES.get(sys.platform, _MEETING_PROCESSES["linux"])
+    app_lower = app_name.lower()
+    for key, names in table.items():
+        if key in app_lower:
+            return names
+    return None
+
+
+def _running_process_names() -> set:
+    """Lowercased executable base names of all running processes (macOS/Linux).
+
+    `ps -A -o comm=` is the same on BSD (macOS) and procps (Linux), unlike
+    pgrep's flags. macOS prints full paths for app bundles, so take the last
+    path component.
+    """
+    result = subprocess.run(
+        ["ps", "-A", "-o", "comm="],
+        capture_output=True, text=True, timeout=3,
+    )
+    if result.returncode != 0:
+        raise RuntimeError(f"ps exited with {result.returncode}")
+    return {
+        line.strip().rsplit("/", 1)[-1].lower()
+        for line in result.stdout.splitlines()
+        if line.strip()
+    }
 
 
 class AudioWorker:
@@ -64,12 +119,13 @@ class AudioWorker:
         self._db = database
         self._running = False
         self._available = False
+        self._last_availability_check: float = 0.0
 
         # Session state
         self._in_meeting = False
         self._meeting_id: Optional[int] = None
         self._meeting_app: Optional[str] = None
-        self._meeting_process: Optional[str] = None  # e.g. "Discord.exe"
+        self._meeting_process: Optional[List[str]] = None  # e.g. ["Discord.exe"]
         self._session_start: Optional[datetime] = None
         self._session_transcript: List[str] = []
         self._last_meeting_app_seen: float = 0
@@ -95,22 +151,42 @@ class AudioWorker:
         self._init_transcription()
 
     def _init_transcription(self):
-        """Check that Gemma audio transcription is available via llama-server."""
+        """Check that Gemma audio transcription is available via llama-server.
+
+        Logs only on state changes, since this is re-run periodically while
+        the server is down (see is_available).
+        """
+        was_available = self._available
+        self._last_availability_check = time.time()
         try:
             from screenmind.engine import llm_client
-            if llm_client.is_available():
-                self._available = True
-                logger.info("Gemma audio transcription ready (via llama-server).")
-            else:
-                logger.warning("llama-server not available — meeting transcription disabled")
-                self._available = False
+            self._available = llm_client.is_available()
+            error = None if self._available else "llama-server not available"
         except Exception as e:
-            logger.warning(f"Transcription init failed: {e}")
             self._available = False
+            error = f"Transcription init failed: {e}"
+
+        if self._available and not was_available:
+            logger.info("Gemma audio transcription ready (via llama-server).")
+        elif error and not getattr(self, "_unavailable_logged", False):
+            logger.warning(f"{error} — meeting transcription disabled until it is reachable")
+        self._unavailable_logged = not self._available
 
     @property
     def is_available(self) -> bool:
-        return self._available and settings.meeting_transcription
+        """Transcription enabled and llama-server reachable.
+
+        If the server was down, it is re-checked at most every
+        AVAILABILITY_RECHECK_SECONDS, so transcription recovers when
+        llama-server starts after ScreenMind.
+        """
+        if not settings.meeting_transcription:
+            return False
+        if not self._available and (
+            time.time() - self._last_availability_check >= AVAILABILITY_RECHECK_SECONDS
+        ):
+            self._init_transcription()
+        return self._available
 
     @property
     def in_meeting(self) -> bool:
@@ -159,17 +235,22 @@ class AudioWorker:
         """Check if the meeting app's native process is still running.
         Returns True for browser-based meetings (no process to check).
         """
-        # TODO: cross-platform — use pgrep on macOS/Linux
         if not self._meeting_process:
             return True  # Browser-based → assume alive, rely on timeout
 
         try:
-            import subprocess
-            result = subprocess.run(
-                ["tasklist", "/FI", f"IMAGENAME eq {self._meeting_process}", "/NH"],
-                capture_output=True, text=True, timeout=3,
-            )
-            return self._meeting_process.lower() in result.stdout.lower()
+            if sys.platform == "win32":
+                for name in self._meeting_process:
+                    result = subprocess.run(
+                        ["tasklist", "/FI", f"IMAGENAME eq {name}", "/NH"],
+                        capture_output=True, text=True, timeout=3,
+                    )
+                    if name.lower() in result.stdout.lower():
+                        return True
+                return False
+
+            running = _running_process_names()
+            return any(name.lower() in running for name in self._meeting_process)
         except Exception:
             return True  # Assume alive on error — don't stop recording
 
@@ -280,12 +361,8 @@ class AudioWorker:
         self._session_transcript = []
         self._last_meeting_app_seen = time.time()
 
-        # Resolve process name for process-alive checks
-        self._meeting_process = None
-        for key, proc in _APP_TO_PROCESS.items():
-            if key in app_name.lower():
-                self._meeting_process = proc
-                break
+        # Resolve process names for process-alive checks
+        self._meeting_process = _meeting_process_names(app_name)
 
         # Insert meeting record
         self._meeting_id = self._db.insert_meeting(
