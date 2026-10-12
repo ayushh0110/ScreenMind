@@ -1,35 +1,37 @@
 """
 macOS Platform Adapter
-Uses AppKit/NSWorkspace for window detection.
+Uses Quartz (CGWindowListCopyWindowInfo) for window detection.
 Accessibility via AXUIElement (requires accessibility permission).
 """
 
 import logging
-import subprocess
+import time
 from typing import Optional, Tuple
 
 from screenmind.platform_support.base import PlatformAdapter
 
 logger = logging.getLogger("screenmind.platform_support.macos")
 
+# One capture cycle asks for the app name, title, PID and bounds separately.
+# Caching the Quartz snapshot briefly makes them all describe the same window.
+_FRONT_WINDOW_TTL = 1.0
+
+# Windows smaller than this (in points) are overlay helpers such as window
+# managers (Rectangle) or menu-bar popovers, not the window the user works in.
+_MIN_WINDOW_SIZE = 50
+
 
 class MacOSAdapter(PlatformAdapter):
-    """macOS implementation using AppKit (pyobjc) and AXUIElement."""
+    """macOS implementation using Quartz (pyobjc) and AXUIElement."""
 
     def __init__(self):
-        self._appkit_available = False
         self._ax_available = False
+        self._front_cache: Optional[dict] = None
+        self._front_cache_ts = float("-inf")
         self._init_frameworks()
 
     def _init_frameworks(self):
         """Try to import macOS frameworks."""
-        try:
-            from AppKit import NSWorkspace  # type: ignore
-            self._appkit_available = True
-            logger.debug("macOS AppKit initialized")
-        except ImportError:
-            logger.warning("macOS AppKit not available (install pyobjc: pip install pyobjc-framework-Cocoa)")
-
         try:
             from ApplicationServices import (  # type: ignore
                 AXUIElementCreateSystemWide,
@@ -45,6 +47,14 @@ class MacOSAdapter(PlatformAdapter):
         return "macOS"
 
     def _front_window(self) -> Optional[dict]:
+        """Frontmost window, cached for _FRONT_WINDOW_TTL seconds."""
+        now = time.monotonic()
+        if now - self._front_cache_ts >= _FRONT_WINDOW_TTL:
+            self._front_cache = self._query_front_window()
+            self._front_cache_ts = now
+        return self._front_cache
+
+    def _query_front_window(self) -> Optional[dict]:
         """Return the frontmost normal window from Quartz (owner, pid, title, bounds).
 
         NSWorkspace.frontmostApplication() goes stale in a process without an
@@ -62,7 +72,8 @@ class MacOSAdapter(PlatformAdapter):
                 if w.get("kCGWindowLayer", 1) != 0:
                     continue
                 bounds = w.get("kCGWindowBounds") or {}
-                if bounds.get("Width", 0) < 50 or bounds.get("Height", 0) < 50:
+                if (bounds.get("Width", 0) < _MIN_WINDOW_SIZE
+                        or bounds.get("Height", 0) < _MIN_WINDOW_SIZE):
                     continue
                 return {
                     "owner": w.get("kCGWindowOwnerName"),
