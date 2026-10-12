@@ -3,13 +3,13 @@
 import logging
 import asyncio
 from collections import Counter
-from datetime import datetime as dt
 
 from fastapi import APIRouter, Query
 from fastapi.responses import JSONResponse
 
 from screenmind.config import settings
 from screenmind.api.dependencies import db
+from screenmind.storage.database import active_seconds
 
 logger = logging.getLogger("screenmind.api.routes.summary")
 
@@ -37,26 +37,12 @@ def _compute_day_metrics(activities: list) -> dict:
         (a.get("category") or "other") for a in analyzed
     )
 
-    # Productive hours from timestamps — sort chronologically, sum capped deltas
-    max_gap = 2 * settings.capture_interval  # Cap per gap (e.g. 80s at default 40s)
-    productive_seconds = 0.0
-    productive_entries = sorted(
-        [a for a in analyzed if (a.get("category") or "other").lower() in _PRODUCTIVE_CATEGORIES],
-        key=lambda a: a.get("timestamp", ""),
-    )
-    for i, a in enumerate(productive_entries):
-        if i == 0:
-            # First entry: count one interval
-            productive_seconds += settings.capture_interval
-            continue
-        try:
-            prev_ts = dt.fromisoformat(productive_entries[i - 1]["timestamp"])
-            curr_ts = dt.fromisoformat(a["timestamp"])
-            delta = (curr_ts - prev_ts).total_seconds()
-            productive_seconds += min(delta, max_gap)
-        except (ValueError, KeyError, TypeError):
-            productive_seconds += settings.capture_interval
-
+    # Productive hours from timestamps — sum of gaps capped at 2× capture interval
+    productive_timestamps = [
+        a.get("timestamp") for a in analyzed
+        if (a.get("category") or "other").lower() in _PRODUCTIVE_CATEGORIES
+    ]
+    productive_seconds = active_seconds(productive_timestamps, settings.capture_interval)
     productive_hours = round(productive_seconds / 3600, 2)
 
     # Top repos from dev_context JOIN

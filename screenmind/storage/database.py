@@ -18,6 +18,33 @@ from screenmind.storage.models import ActivityRecord, DevContext, ScreenshotEntr
 logger = logging.getLogger("screenmind.storage.database")
 
 
+def active_seconds(timestamps: List[str], interval: float) -> float:
+    """Estimate time covered by a series of capture timestamps.
+
+    The first capture counts as one interval. Each later capture adds the
+    gap since the previous one, capped at 2 × interval so idle stretches
+    (lunch, overnight) don't count as tracked time. Unparseable timestamps
+    count as one interval.
+
+    Args:
+        timestamps: ISO timestamps (any order).
+        interval: Capture interval in seconds.
+    """
+    max_gap = 2 * interval
+    total = 0.0
+    prev = None
+    for ts in sorted(timestamps, key=lambda t: t or ""):
+        try:
+            curr = datetime.fromisoformat(ts)
+        except (TypeError, ValueError):
+            total += interval
+            prev = None
+            continue
+        total += interval if prev is None else min((curr - prev).total_seconds(), max_gap)
+        prev = curr
+    return total
+
+
 class Database:
     """
     Thread-safe SQLite database for ScreenMind activity storage.
@@ -456,11 +483,15 @@ class Database:
         """Get aggregated statistics for a date range."""
         conn = self._get_conn()
 
-        # Total activities
-        total = conn.execute(
-            "SELECT COUNT(*) as cnt FROM activities WHERE DATE(timestamp) BETWEEN ? AND ? AND status = 'ok'",
-            (date_from, date_to),
-        ).fetchone()["cnt"]
+        # Total activities + tracked time (gap-capped, see active_seconds)
+        timestamps = [
+            r["timestamp"] for r in conn.execute(
+                "SELECT timestamp FROM activities WHERE DATE(timestamp) BETWEEN ? AND ? AND status = 'ok'",
+                (date_from, date_to),
+            ).fetchall()
+        ]
+        total = len(timestamps)
+        tracked_hours = round(active_seconds(timestamps, settings.capture_interval) / 3600, 2)
 
         # Category breakdown
         categories = conn.execute(
@@ -529,6 +560,7 @@ class Database:
 
         return {
             "total_activities": total,
+            "tracked_hours": tracked_hours,
             "category_breakdown": {r["category"]: r["cnt"] for r in categories},
             "top_apps": {r["app_name"]: r["cnt"] for r in apps},
             "top_repos": {r["repo_name"]: r["cnt"] for r in repos},

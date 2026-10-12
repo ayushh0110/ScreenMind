@@ -149,3 +149,76 @@ def test_get_daily_summary_not_found(db):
     """get_daily_summary returns None for nonexistent dates."""
     result = db.get_daily_summary("2099-01-01")
     assert result is None
+
+
+# ── active_seconds / tracked_hours ─────────────────────────────────────
+
+from screenmind.storage.database import active_seconds
+
+
+class TestActiveSeconds:
+    def test_empty(self):
+        assert active_seconds([], 40) == 0
+
+    def test_single_capture_counts_one_interval(self):
+        assert active_seconds(["2026-05-20T10:00:00"], 40) == 40
+
+    def test_short_gaps_counted_fully(self):
+        ts = ["2026-05-20T10:00:00", "2026-05-20T10:00:30", "2026-05-20T10:01:00"]
+        assert active_seconds(ts, 40) == 40 + 30 + 30
+
+    def test_long_gap_capped(self):
+        """A 2-hour lunch break counts as 2 × interval, not 2 hours."""
+        ts = ["2026-05-20T12:00:00", "2026-05-20T14:00:00"]
+        assert active_seconds(ts, 40) == 40 + 80
+
+    def test_unsorted_input(self):
+        ts = ["2026-05-20T10:01:00", "2026-05-20T10:00:00"]
+        assert active_seconds(ts, 40) == 40 + 60
+
+    def test_bad_timestamp_counts_one_interval(self):
+        ts = ["2026-05-20T10:00:00", "not-a-date", None]
+        assert active_seconds(ts, 40) == 40 * 3
+
+
+def _ok_activity(db, ts, category="coding"):
+    activity_id = db.insert_activity(ScreenshotEntry(timestamp=ts, screenshot_path="/tmp/x.jpg"))
+    db.update_activity_analysis(activity_id, ActivityRecord(app_name="Code", activity_category=category))
+    return activity_id
+
+
+def test_get_stats_tracked_hours_spans_range(db, monkeypatch):
+    """tracked_hours covers every day in the range, not just the first."""
+    from screenmind.config import settings
+    monkeypatch.setattr(settings, "capture_interval", 40)
+
+    for day in (18, 19, 20):
+        for minute in range(0, 60, 1):  # one capture per minute for an hour
+            _ok_activity(db, datetime(2026, 5, day, 9, minute, 0))
+
+    one_day = db.get_stats("2026-05-20", "2026-05-20")
+    three_days = db.get_stats("2026-05-18", "2026-05-20")
+
+    # 60 captures/day, 1-minute gaps (capped at 80s → 60s each): 40 + 59*60 seconds
+    assert one_day["tracked_hours"] == round((40 + 59 * 60) / 3600, 2)
+    assert three_days["total_activities"] == 180
+    assert three_days["tracked_hours"] > one_day["tracked_hours"] * 2.9
+
+
+def test_summary_metrics_use_capped_gaps(monkeypatch):
+    """Productive hours keep the same gap-capped semantics after the refactor."""
+    from screenmind.api.routes.summary import _compute_day_metrics
+    from screenmind.config import settings
+    monkeypatch.setattr(settings, "capture_interval", 40)
+
+    activities = [
+        {"status": "ok", "category": "coding", "timestamp": "2026-05-20T10:00:00"},
+        {"status": "ok", "category": "coding", "timestamp": "2026-05-20T10:00:30"},
+        {"status": "ok", "category": "browsing", "timestamp": "2026-05-20T10:00:45"},
+        {"status": "ok", "category": "coding", "timestamp": "2026-05-20T12:00:00"},
+        {"status": "skipped", "category": "coding", "timestamp": "2026-05-20T12:00:10"},
+    ]
+    metrics = _compute_day_metrics(activities)
+    # Productive (coding) only: 40 + 30 + min(7170, 80)
+    assert metrics["productive_hours"] == round((40 + 30 + 80) / 3600, 2)
+    assert metrics["category_breakdown"] == {"coding": 3, "browsing": 1}

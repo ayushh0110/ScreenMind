@@ -4,9 +4,22 @@
    ═══════════════════════════════════════════════════════════ */
 
 const API = '';
-// Use local date (not UTC) to avoid timezone shift issues
-const _now = new Date();
-let currentDate = `${_now.getFullYear()}-${String(_now.getMonth()+1).padStart(2,'0')}-${String(_now.getDate()).padStart(2,'0')}`;
+
+// ── Local dates ───────────────────────────────────────────
+// Timestamps are stored in local time, so all date math uses the local
+// calendar. Never use toISOString() for dates — it converts to UTC.
+function _fmtLocalDate(d) {
+  return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`;
+}
+function localToday() { return _fmtLocalDate(new Date()); }
+function shiftLocalDate(dateStr, days) {
+  const [y, m, d] = dateStr.split('-').map(Number);
+  const dt = new Date(y, m - 1, d);
+  dt.setDate(dt.getDate() + days);
+  return _fmtLocalDate(dt);
+}
+
+let currentDate = localToday();
 let currentView = 'timeline';
 
 // ── Lock Screen Check ──────────────────────────────────────
