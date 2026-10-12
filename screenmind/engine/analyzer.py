@@ -25,6 +25,7 @@ from PIL import Image
 
 from screenmind.config import settings
 from screenmind.engine import llm_client
+from screenmind.engine.browsers import BROWSER_NAMES, is_browser
 from screenmind.storage.models import ActivityRecord
 
 logger = logging.getLogger("screenmind.engine.analyzer")
@@ -129,11 +130,10 @@ _SIMPLE_TITLE_REJECT = ('/', '\\', '@', ':', '$', '#', '~',
 # Known browser process names — secondary detection when title suffix is missing.
 # Used as a fallback in _is_browser_window() when L1 title extraction shadows
 # the OS browser name (e.g. title="Jenkins" from Firefox tab without suffix).
-_BROWSER_PROCESS_NAMES = frozenset({
-    "chrome", "chromium", "firefox", "firefox-esr",
-    "brave", "opera", "safari", "vivaldi", "arc",
-    "msedge",  # Also in GENERIC_PROCESS_NAMES — intentional overlap
-})
+# Includes macOS app names ("Google Chrome", "Microsoft Edge"), which the OS
+# reports instead of process names. "msedge" is also in GENERIC_PROCESS_NAMES
+# — intentional overlap.
+_BROWSER_PROCESS_NAMES = BROWSER_NAMES
 
 
 def _os_app_name_is_trusted() -> bool:
@@ -225,7 +225,7 @@ def _is_browser_window(
     """
     if window_title and any(window_title.endswith(s) for s in _BROWSER_TITLE_SUFFIXES):
         return True
-    if app_name_hint and app_name_hint.lower().strip() in _BROWSER_PROCESS_NAMES:
+    if app_name_hint and is_browser(app_name_hint):
         return True
     return False
 

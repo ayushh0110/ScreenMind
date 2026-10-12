@@ -136,3 +136,102 @@ class TestProcessAlive:
         worker._meeting_process = ["zoom"]
         with patch.object(aw.subprocess, "run", side_effect=FileNotFoundError("ps")):
             assert worker._is_meeting_process_alive() is True
+
+
+# ── Meeting detection (native apps + browser tabs) ─────────────────────
+
+@pytest.fixture
+def default_meeting_apps(monkeypatch):
+    monkeypatch.setattr(aw.settings, "meeting_apps", "zoom,teams,meet,webex,slack,discord")
+
+
+@pytest.mark.usefixtures("default_meeting_apps")
+class TestDetectMeeting:
+    @pytest.mark.parametrize("app,title,label", [
+        # Google Meet in Edge — Edge's zero-width space and "and N more pages" suffix
+        ("msedge", "Meet - abc-defg-hij and 2 more pages - Personal - Microsoft​ Edge",
+         "Google Meet (Edge)"),
+        ("msedge", "Meet – abc-defg-hij - Microsoft​ Edge", "Google Meet (Edge)"),
+        ("chrome", "Meet - abc-defg-hij - Google Chrome", "Google Meet (Chrome)"),
+        ("chrome", "Google Meet - Google Chrome", "Google Meet (Chrome)"),
+        ("firefox", "meet.google.com/abc-defg-hij — Mozilla Firefox", "Google Meet (Firefox)"),
+        # Other services on the web
+        ("msedge", "Meeting with Priya | Microsoft Teams - Microsoft​ Edge", "Microsoft Teams (Edge)"),
+        ("chrome", "Zoom Meeting - Google Chrome", "Zoom (Chrome)"),
+        ("brave", "Cisco Webex Meetings - Brave", "Webex (Brave)"),
+        # macOS app names
+        ("Google Chrome", "Meet - abc-defg-hij", "Google Meet (Chrome)"),
+        ("Microsoft Edge", "Meet - abc-defg-hij", "Google Meet (Edge)"),
+        ("Arc", "Meet - abc-defg-hij", "Google Meet (Arc)"),
+        ("Firefox", "Meet - abc-defg-hij", "Google Meet (Firefox)"),
+    ])
+    def test_browser_meetings(self, app, title, label):
+        assert aw._detect_meeting(app, title) == (label, True)
+
+    @pytest.mark.parametrize("app,title", [
+        ("chrome", "Meeting notes.docx - Google Docs - Google Chrome"),
+        ("msedge", "Meet the team - Google Docs - Microsoft​ Edge"),
+        ("chrome", "How to zoom in on photos - Google Search - Google Chrome"),
+        ("firefox", "Inbox (3) - Gmail — Mozilla Firefox"),
+        ("chrome", None),
+    ])
+    def test_ordinary_browser_tabs_ignored(self, app, title):
+        assert aw._detect_meeting(app, title) is None
+
+    def test_native_apps_unchanged(self):
+        assert aw._detect_meeting("Zoom", "Zoom Meeting") == ("Zoom", False)
+        assert aw._detect_meeting("ms-teams", None) == ("ms-teams", False)
+        assert aw._detect_meeting("Code", "Meet - abc - Visual Studio Code") is None
+
+    def test_keyword_removed_disables_browser_pattern(self, monkeypatch):
+        monkeypatch.setattr(aw.settings, "meeting_apps", "zoom,teams")
+        assert aw._detect_meeting("chrome", "Meet - abc-defg-hij - Google Chrome") is None
+        assert aw._detect_meeting("chrome", "Zoom Meeting - Google Chrome") == ("Zoom (Chrome)", True)
+
+
+@pytest.mark.usefixtures("default_meeting_apps", "transcription_on")
+class TestCheckMeeting:
+    @pytest.fixture
+    def live_worker(self, worker):
+        worker._available = True
+        worker._start_audio_probe = MagicMock()
+        return worker
+
+    def test_meet_in_edge_starts_probe(self, live_worker):
+        live_worker.check_meeting("msedge", "Meet - abc-defg-hij - Microsoft​ Edge")
+        live_worker._start_audio_probe.assert_called_once()
+        assert live_worker._pending_meeting_app == "Google Meet (Edge)"
+        assert live_worker._pending_in_browser is True
+
+    def test_process_name_only_still_works(self, live_worker):
+        """Older callers pass only the app name."""
+        live_worker.check_meeting("Zoom")
+        live_worker._start_audio_probe.assert_called_once()
+        assert live_worker._pending_in_browser is False
+
+    def test_plain_browser_tab_no_probe(self, live_worker):
+        live_worker.check_meeting("msedge", "GitHub - Microsoft​ Edge")
+        live_worker._start_audio_probe.assert_not_called()
+
+
+class TestStartMeetingProcess:
+    @pytest.fixture
+    def started(self, worker, monkeypatch):
+        worker._recording_loop = lambda: None
+        monkeypatch.setattr("screenmind.engine.model_manager.is_audio_capable", lambda: True)
+        monkeypatch.setattr("screenmind.ui.overlay.show_overlay_notification", lambda *a, **k: None)
+        yield worker
+        worker._stop_recording.set()
+
+    def test_browser_meeting_has_no_process(self, started, monkeypatch):
+        """A "Microsoft Teams (Edge)" label must not map to ms-teams.exe."""
+        monkeypatch.setattr(aw.sys, "platform", "win32")
+        started._start_meeting("Microsoft Teams (Edge)", in_browser=True)
+        assert started._meeting_process is None
+        started._db.insert_meeting.assert_called_once()
+        assert started._db.insert_meeting.call_args.kwargs["app_name"] == "Microsoft Teams (Edge)"
+
+    def test_native_meeting_maps_process(self, started, monkeypatch):
+        monkeypatch.setattr(aw.sys, "platform", "win32")
+        started._start_meeting("Zoom")
+        assert started._meeting_process == ["Zoom.exe"]

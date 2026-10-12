@@ -6,6 +6,7 @@ transcribes with Gemma 4's native audio encoder, and generates meeting summaries
 
 import io
 import logging
+import re
 import subprocess
 import sys
 import time
@@ -17,6 +18,7 @@ from typing import Optional, List
 import numpy as np
 
 from screenmind.config import settings
+from screenmind.engine.browsers import browser_label, is_browser
 from screenmind.storage.database import Database
 
 logger = logging.getLogger("screenmind.workers.audio_worker")
@@ -72,6 +74,59 @@ _MEETING_PROCESSES = {
         "slack": ["slack"],
     },
 }
+
+
+# Meetings running inside a browser tab are found by window title. Each
+# pattern applies only while its keyword is in settings.meeting_apps. They are
+# specific on purpose: a bare "meet" would also match "Meeting notes.docx" or
+# "Meet the team - Google Docs", and the voice probe would then start
+# recording the microphone.
+_BROWSER_MEETING_PATTERNS = [
+    ("meet", "Google Meet",
+     re.compile(r"\bgoogle meet\b|^meet\s*[-:]\s|meet\.google\.com", re.IGNORECASE)),
+    ("zoom", "Zoom",
+     re.compile(r"\bzoom (?:meeting|workplace|webinar)\b|app\.zoom\.us", re.IGNORECASE)),
+    ("teams", "Microsoft Teams",
+     re.compile(r"\bmicrosoft teams\b|teams\.(?:microsoft|live)\.com", re.IGNORECASE)),
+    ("webex", "Webex",
+     re.compile(r"\bwebex\b", re.IGNORECASE)),
+]
+
+# Edge puts a zero-width space inside "Microsoft​ Edge"; titles also mix
+# hyphens with en/em dashes.
+_ZERO_WIDTH_RE = re.compile("[​‌‍⁠﻿]")
+_DASH_RE = re.compile("[–—−]")
+
+
+def _normalize_title(title: str) -> str:
+    title = _ZERO_WIDTH_RE.sub("", title)
+    title = _DASH_RE.sub("-", title)
+    return " ".join(title.split())
+
+
+def _detect_meeting(app_name: str, window_title: Optional[str]) -> Optional[tuple]:
+    """Identify a meeting in the foreground window.
+
+    Returns (label, in_browser) or None:
+      - Native apps: the process name contains a meeting_apps keyword
+        ("Zoom.exe" → ("Zoom.exe", False)).
+      - Browsers: the window title matches a meeting service pattern
+        ("Meet - abc-defg-hij - Microsoft Edge" → ("Google Meet (Edge)", True)).
+    """
+    keywords = settings.meeting_apps_list
+    if is_browser(app_name):
+        if not window_title:
+            return None
+        title = _normalize_title(window_title)
+        for keyword, label, pattern in _BROWSER_MEETING_PATTERNS:
+            if keyword in keywords and pattern.search(title):
+                return f"{label} ({browser_label(app_name)})", True
+        return None
+
+    app_lower = app_name.lower()
+    if any(k in app_lower for k in keywords):
+        return app_name, False
+    return None
 
 
 def _meeting_process_names(app_name: str) -> Optional[List[str]]:
@@ -138,6 +193,7 @@ class AudioWorker:
         self._probe_detected_audio: bool = False
         self._last_probe_time: float = 0
         self._pending_meeting_app: Optional[str] = None
+        self._pending_in_browser: bool = False
 
         # Confirmation state — require multiple consecutive voice probes
         self._consecutive_voice_probes: int = 0
@@ -192,10 +248,13 @@ class AudioWorker:
     def in_meeting(self) -> bool:
         return self._in_meeting
 
-    def check_meeting(self, app_name: str):
+    def check_meeting(self, app_name: str, window_title: Optional[str] = None):
         """
-        Called by CaptureWorker every 5s with current foreground app name.
-        Detects meeting start/end transitions.
+        Called by CaptureWorker every 5s with the foreground app name and
+        window title. Detects meeting start/end transitions.
+
+        Native meeting apps are matched by process name; meetings in a
+        browser tab (Google Meet, Teams/Zoom web) by window title.
 
         Uses audio probe confirmation: when a meeting app is detected,
         we sample mic + system audio briefly. Recording only starts if
@@ -205,15 +264,14 @@ class AudioWorker:
         if not self.is_available or not app_name:
             return
 
-        app_lower = app_name.lower()
-        is_meeting_app = any(m in app_lower for m in settings.meeting_apps_list)
+        detected = _detect_meeting(app_name, window_title)
 
-        if is_meeting_app:
+        if detected:
             self._last_meeting_app_seen = time.time()
             if not self._in_meeting and not self._probe_in_progress:
                 # No probe running — start one if cooldown elapsed
                 if time.time() - self._last_probe_time > PROBE_COOLDOWN:
-                    self._pending_meeting_app = app_name
+                    self._pending_meeting_app, self._pending_in_browser = detected
                     self._start_audio_probe()
                 # else: probe is still running, wait for next cycle
         elif self._in_meeting:
@@ -335,7 +393,7 @@ class AudioWorker:
                     # Confirmed! Start the meeting.
                     app = self._pending_meeting_app or "Unknown"
                     self._consecutive_voice_probes = 0
-                    self._start_meeting(app)
+                    self._start_meeting(app, in_browser=self._pending_in_browser)
                 else:
                     logger.info(f"Voice probe {self._consecutive_voice_probes}/{PROBE_CONFIRM_COUNT} "
                           f"— confirming before starting meeting...")
@@ -346,8 +404,15 @@ class AudioWorker:
                     self._silence_logged_app = self._pending_meeting_app
                     logger.info(f"{self._pending_meeting_app} in foreground but no voice detected — skipping")
 
-    def _start_meeting(self, app_name: str):
-        """Begin recording a meeting session."""
+    def _start_meeting(self, app_name: str, in_browser: bool = False):
+        """Begin recording a meeting session.
+
+        Args:
+            app_name: Native process name, or a label like "Google Meet (Edge)".
+            in_browser: Meeting runs in a browser tab. There is no process to
+                watch (a "Microsoft Teams (Edge)" label must not map to
+                ms-teams.exe), so the end is detected by silence + timeout.
+        """
         # Guard: don't record if active model can't transcribe audio
         from screenmind.engine import model_manager
         if not model_manager.is_audio_capable():
@@ -362,7 +427,7 @@ class AudioWorker:
         self._last_meeting_app_seen = time.time()
 
         # Resolve process names for process-alive checks
-        self._meeting_process = _meeting_process_names(app_name)
+        self._meeting_process = None if in_browser else _meeting_process_names(app_name)
 
         # Insert meeting record
         self._meeting_id = self._db.insert_meeting(

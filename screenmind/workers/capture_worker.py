@@ -86,14 +86,15 @@ class CaptureWorker:
                 self._pending_bookmark = False
                 await self._do_bookmark_capture()
 
-            # Meeting detection runs ALWAYS (even when paused)
+            # Meeting detection runs ALWAYS (even when paused). The title is
+            # needed for meetings inside a browser tab (e.g. Google Meet).
             try:
                 if hasattr(self, '_audio_worker') and self._audio_worker:
-                    from screenmind.capture.window import get_active_app_name as _get_app
-                    _app = _get_app()
+                    _app = get_active_app_name()
                     if _app:
+                        _title = get_active_window_title()
                         await asyncio.get_event_loop().run_in_executor(
-                            None, self._audio_worker.check_meeting, _app
+                            None, self._audio_worker.check_meeting, _app, _title
                         )
             except Exception:
                 pass
