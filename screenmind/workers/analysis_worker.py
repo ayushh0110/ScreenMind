@@ -289,6 +289,7 @@ class AnalysisWorker:
                     active_url=active_url,
                 )
                 self._cache_hits += 1
+                self._check_focus(capture, cached["analysis"].activity_category)
                 elapsed = time.time() - start
                 self._processed += 1
                 logger.info(f"#{self._processed} in {elapsed:.1f}s: "
@@ -569,6 +570,9 @@ class AnalysisWorker:
             if dev_ctx:
                 self._db.insert_dev_context(activity_id, dev_ctx)
 
+            # 8b. Focus-streak notification (needs the analyzed category)
+            self._check_focus(capture, analysis.activity_category)
+
             # 9. Auto-bookmark important moments
             if settings.auto_bookmark and not capture.bookmarked:
                 keywords = [k.strip().lower() for k in settings.auto_bookmark_keywords.split(",") if k.strip()]
@@ -639,6 +643,21 @@ class AnalysisWorker:
                 ),
                 status="failed",
             )
+
+    # Only live captures should drive notifications about what the user is doing now
+    _FOCUS_CHECK_MAX_AGE = 180
+
+    def _check_focus(self, capture: CaptureResult, category: str):
+        """Run the focus-streak notification for a freshly analyzed capture."""
+        if self._is_backfill:
+            return
+        if (datetime.now() - capture.timestamp).total_seconds() > self._FOCUS_CHECK_MAX_AGE:
+            return
+        try:
+            from screenmind.integrations.smart_notify import check_focus
+            check_focus(capture.app_name or "", category)
+        except Exception as e:
+            logger.debug(f"Focus check failed: {e}")
 
     async def _backfill_skipped(self):
         """Re-analyze one unanalyzed or skipped entry when idle.

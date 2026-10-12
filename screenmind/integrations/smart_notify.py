@@ -30,11 +30,12 @@ _continuous_work_start = None
 def check(app_name: str, category: str = ""):
     """
     Check if a notification should be shown based on current app usage.
-    Called every capture tick (~5-30s).
-    
+    Called every capture tick (~5-30s), before the capture is analyzed.
+
     Args:
         app_name: Current foreground app name.
-        category: Activity category (coding, browsing, etc.)
+        category: Activity category (coding, browsing, etc.), if already
+            known. When given, the focus-streak check runs too.
     """
     global _last_app, _continuous_work_start
 
@@ -80,17 +81,34 @@ def check(app_name: str, category: str = ""):
             )
             _continuous_work_start = now  # Reset after showing
 
-    # 3. Focus streak (2+ hours of coding)
-    if category == "coding":
-        coding_start = _app_start_time.get(app_lower, now)
-        coding_minutes = (now - coding_start) / 60
-        if coding_minutes >= 120:
-            _notify(
-                "focus",
-                "🔥 Focus Streak!",
-                f"{int(coding_minutes)} minutes of deep coding. Impressive!",
-                color="#8b5cf6",
-            )
+    # 3. Focus streak — needs the category, which capture-time callers don't have
+    if category:
+        check_focus(app_name, category)
+
+
+def check_focus(app_name: str, category: str):
+    """
+    Celebrate a focus streak (2+ hours of coding in one app session).
+
+    Called by the analysis worker once a capture's category is known. Uses
+    the app-session start time tracked by check(), and only fires while that
+    app is still the current foreground app.
+    """
+    if not settings.smart_notifications or category != "coding":
+        return
+
+    app_lower = (app_name or "").lower()
+    if app_lower != _last_app or app_lower not in _app_start_time:
+        return  # Not the current app session
+
+    coding_minutes = (time.time() - _app_start_time[app_lower]) / 60
+    if coding_minutes >= 120:
+        _notify(
+            "focus",
+            "🔥 Focus Streak!",
+            f"{int(coding_minutes)} minutes of deep coding. Impressive!",
+            color="#8b5cf6",
+        )
 
 
 def _notify(notification_type: str, title: str, message: str, color: str = "#8b5cf6"):
