@@ -204,3 +204,37 @@ class TestAnalysisWorkerBackfill:
         capture = worker._process.await_args.args[0]
         assert capture.app_name == "Telegram"
         assert capture.window_title == "Chats"
+
+    async def test_backfill_ignores_unknown_app_name(self, db, tmp_path):
+        """A skipped row with no OS detection stores app_name="unknown".
+
+        That placeholder must not reach the analyzer as an OS hint, or
+        _normalize() would record "unknown" as the app name.
+        """
+        from PIL import Image
+        from screenmind.storage.models import ActivityRecord, ScreenshotEntry
+        from screenmind.workers.analysis_worker import AnalysisWorker
+
+        shot = tmp_path / "shot.jpg"
+        Image.new("RGB", (64, 64), "white").save(shot)
+        activity_id = db.insert_activity(ScreenshotEntry(
+            timestamp=datetime.now(),
+            screenshot_path=str(shot),
+            window_title="Untitled",
+            detected_app_name=None,
+            bookmarked=False,
+            analyzed=False,
+        ))
+        db.update_activity_analysis(
+            activity_id=activity_id,
+            analysis=ActivityRecord(app_name="unknown", activity_summary="Skipped (analysis backlog)"),
+            analysis_method="skipped",
+            status="skipped",
+        )
+
+        worker = AnalysisWorker(queue=asyncio.Queue(maxsize=100), database=db)
+        worker._process = AsyncMock()
+        await worker._backfill_skipped()
+
+        capture = worker._process.await_args.args[0]
+        assert capture.app_name is None
