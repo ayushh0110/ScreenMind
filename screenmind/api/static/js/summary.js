@@ -21,7 +21,7 @@ async function renderSummary(el) {
   el.innerHTML = `
     ${softLockHtml}
     <div style="display:flex;align-items:center;gap:12px;margin-bottom:24px">
-      <input type="date" id="summary-date" value="${currentDate}">
+      <input type="date" id="summary-date" value="${currentDate}" max="${localToday()}">
       <span class="hint-trigger" id="summary-hint-trigger" style="display:none" title="">?</span>
     </div>
     <div style="display:grid;grid-template-columns:1fr 1fr;gap:20px">
@@ -44,7 +44,8 @@ async function renderSummary(el) {
       t.title = `Using ${mdata.active}. Upgrade to a larger model in Settings for better summaries.`;
     }
   } catch {}
-  $('#summary-date').addEventListener('change', e => { currentDate = e.target.value; loadExistingSummary(); });
+  bindDateNav($('#summary-date'), null, null, d => { currentDate = d; loadExistingSummary(); });
+  currentDate = $('#summary-date').value;
   loadExistingSummary();
   $('#gen-summary').addEventListener('click', async () => {
     const body = $('#summary-body');

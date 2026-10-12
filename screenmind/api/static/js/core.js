@@ -19,6 +19,38 @@ function shiftLocalDate(dateStr, days) {
   return _fmtLocalDate(dt);
 }
 
+// Activity only exists up to today, so date pickers never go past it.
+// Returns `value`, or today if it is empty or in the future.
+function clampToToday(value, notify = true) {
+  const today = localToday();
+  if (value && value > today) {
+    if (notify) showToast('No activity in the future — showing today', 'info');
+    return today;
+  }
+  return value || today;
+}
+
+// Wire a date <input> and optional ◀ ▶ buttons so the date can't pass today:
+// sets `max`, clamps typed dates, disables ▶ on today. onChange(date) gets
+// the clamped date. Returns sync(), which refreshes `max` (e.g. after midnight).
+function bindDateNav(input, prevBtn, nextBtn, onChange) {
+  const sync = () => {
+    input.max = localToday();
+    if (nextBtn) nextBtn.disabled = input.value >= input.max;
+  };
+  const apply = (value) => {
+    input.value = clampToToday(value);
+    sync();
+    onChange(input.value);
+  };
+  input.value = clampToToday(input.value, false);
+  input.addEventListener('change', () => apply(input.value));
+  if (prevBtn) prevBtn.addEventListener('click', () => apply(shiftLocalDate(input.value || localToday(), -1)));
+  if (nextBtn) nextBtn.addEventListener('click', () => apply(shiftLocalDate(input.value || localToday(), 1)));
+  sync();
+  return sync;
+}
+
 let currentDate = localToday();
 let currentView = 'timeline';
 

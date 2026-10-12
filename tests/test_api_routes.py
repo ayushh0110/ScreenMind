@@ -161,3 +161,29 @@ async def test_models_list(client):
     data = resp.json()
     assert "models" in data
     assert len(data["models"]) >= 1
+
+
+# ── Summary / standup date validation ─────────────────────────────────
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("endpoint", ["/api/summary/generate", "/api/standup/generate"])
+async def test_generate_rejects_future_date(client, endpoint):
+    from datetime import date, timedelta
+    tomorrow = (date.today() + timedelta(days=1)).isoformat()
+    resp = await client.post(f"{endpoint}?date={tomorrow}")
+    assert resp.status_code == 400
+    assert "future" in resp.json()["detail"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("endpoint", ["/api/summary/generate", "/api/standup/generate"])
+async def test_generate_rejects_malformed_date(client, endpoint):
+    resp = await client.post(f"{endpoint}?date=not-a-date")
+    assert resp.status_code == 400
+
+
+@pytest.mark.asyncio
+async def test_generate_accepts_past_date_without_data(client):
+    resp = await client.post("/api/summary/generate?date=2020-01-01")
+    assert resp.status_code == 200
+    assert "No activities" in resp.json()["summary"]["summary"]

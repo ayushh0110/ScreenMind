@@ -3,8 +3,9 @@
 import logging
 import asyncio
 from collections import Counter
+from datetime import date as _date
 
-from fastapi import APIRouter, Query
+from fastapi import APIRouter, HTTPException, Query
 from fastapi.responses import JSONResponse
 
 from screenmind.config import settings
@@ -19,6 +20,25 @@ router = APIRouter(prefix="/api", tags=["summary"])
 # Categories that count as focused/productive work time.
 # Browsing and communication are excluded — they can be doomscrolling/chat.
 _PRODUCTIVE_CATEGORIES = {"coding", "writing", "terminal", "design", "meeting"}
+
+
+def _resolve_generation_date(date_param) -> str:
+    """Date to generate a summary/standup for (default today).
+
+    Rejects malformed and future dates — there is no activity to summarize
+    yet, and nothing should be persisted for days that haven't happened.
+    Uses the server's local date, matching how timestamps are stored.
+    """
+    today = _date.today()
+    if not date_param:
+        return today.isoformat()
+    try:
+        target = _date.fromisoformat(date_param)
+    except (TypeError, ValueError):
+        raise HTTPException(status_code=400, detail="Invalid date, expected YYYY-MM-DD")
+    if target > today:
+        raise HTTPException(status_code=400, detail="Cannot generate for a future date")
+    return target.isoformat()
 
 
 def _compute_day_metrics(activities: list) -> dict:
@@ -76,7 +96,7 @@ async def generate_summary(
     from screenmind.engine import llm_client
     from screenmind.storage.models import DailySummary
 
-    target = date or str(__import__("datetime").date.today())
+    target = _resolve_generation_date(date)
     activities = db.get_activities_by_date(target, limit=200)
 
     if not activities:
@@ -194,7 +214,7 @@ async def generate_standup(
     """Generate standup notes."""
     from screenmind.engine import llm_client
 
-    target = date or str(__import__("datetime").date.today())
+    target = _resolve_generation_date(date)
     activities = db.get_activities_by_date(target, limit=200)
 
     if not activities:

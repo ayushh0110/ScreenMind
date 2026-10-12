@@ -22,7 +22,7 @@ async function renderMemos(el) {
     ${memoAudioWarning}
     <div class="date-nav" style="margin-bottom:20px">
       <button class="btn btn-ghost btn-sm" id="memo-prev">◀</button>
-      <input type="date" id="memo-date" value="${memosDate}">
+      <input type="date" id="memo-date" value="${memosDate}" max="${localToday()}">
       <button class="btn btn-ghost btn-sm" id="memo-next">▶</button>
       <span style="margin-left:12px;color:var(--text-muted);font-size:0.85rem" id="memo-count"></span>
     </div>
@@ -31,19 +31,8 @@ async function renderMemos(el) {
     </div>
     <div id="memos-list"><div class="spinner"></div></div>`;
 
-  $('#memo-date').addEventListener('change', function(e) { memosDate = e.target.value; loadMemos(memosDate); });
-  $('#memo-prev').addEventListener('click', function() {
-    var d = new Date(memosDate); d.setDate(d.getDate() - 1);
-    memosDate = d.toISOString().split('T')[0];
-    $('#memo-date').value = memosDate;
-    loadMemos(memosDate);
-  });
-  $('#memo-next').addEventListener('click', function() {
-    var d = new Date(memosDate); d.setDate(d.getDate() + 1);
-    memosDate = d.toISOString().split('T')[0];
-    $('#memo-date').value = memosDate;
-    loadMemos(memosDate);
-  });
+  bindDateNav($('#memo-date'), $('#memo-prev'), $('#memo-next'), function(d) { memosDate = d; loadMemos(memosDate); });
+  memosDate = $('#memo-date').value;
   loadMemos(memosDate);
 }
 

@@ -4,29 +4,33 @@ async function renderTimeline(el) {
   el.innerHTML = `
     <div class="date-nav" style="margin-bottom:20px">
       <button class="btn btn-ghost btn-sm" id="prev-day">\u25c0</button>
-      <input type="date" id="timeline-date" value="${currentDate}">
+      <input type="date" id="timeline-date" value="${currentDate}" max="${localToday()}">
       <button class="btn btn-ghost btn-sm" id="next-day">\u25b6</button>
       <span style="margin-left:12px;color:var(--text-muted);font-size:0.85rem" id="tl-count"></span>
       <button class="btn btn-ghost btn-sm" id="clear-timeline" style="margin-left:auto;color:#ef4444;font-size:0.8rem" title="Clear today's timeline">🗑 Clear Timeline</button>
     </div>
     <div class="timeline" id="timeline-list"><div class="spinner"></div></div>`;
-  $('#timeline-date').addEventListener('change', e => { currentDate = e.target.value; loadTimeline(); });
-  $('#prev-day').addEventListener('click', () => shiftDate(-1));
-  $('#next-day').addEventListener('click', () => shiftDate(1));
+  const dateInput = $('#timeline-date');
+  const syncDateNav = bindDateNav(dateInput, $('#prev-day'), $('#next-day'), d => { currentDate = d; loadTimeline(); });
+  currentDate = dateInput.value;
   $('#clear-timeline').addEventListener('click', confirmClearTimeline);
   loadTimeline();
   // Inject Model Hub pill into header-actions (guard against duplicates)
   _injectTimelinePill();
-  // Auto-refresh timeline every 30s
+  // Auto-refresh timeline every 30s. After midnight, follow "today" forward
+  // if the user was viewing the previous today.
+  let shownToday = localToday();
   if (window._tlRefresh) clearInterval(window._tlRefresh);
-  window._tlRefresh = setInterval(() => { if (currentView === 'timeline') loadTimeline(true); }, 30000);
-}
-
-function shiftDate(days) {
-  const d = new Date(currentDate); d.setDate(d.getDate() + days);
-  currentDate = d.toISOString().split('T')[0];
-  $('#timeline-date').value = currentDate;
-  loadTimeline();
+  window._tlRefresh = setInterval(() => {
+    if (currentView !== 'timeline') return;
+    const today = localToday();
+    if (today !== shownToday) {
+      if (currentDate === shownToday) { currentDate = today; dateInput.value = today; }
+      shownToday = today;
+      syncDateNav();
+    }
+    loadTimeline(true);
+  }, 30000);
 }
 
 async function loadTimeline(silent = false) {

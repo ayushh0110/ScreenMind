@@ -1,6 +1,6 @@
 //  MEETINGS VIEW
 // ══════════════════════════════════════════════════════════
-var meetingsDate = new Date().toISOString().split('T')[0];
+var meetingsDate = localToday();  // local date — toISOString() would give UTC
 
 async function renderMeetings(el) {
   // Check if current model supports audio
@@ -20,16 +20,15 @@ async function renderMeetings(el) {
     ${audioWarning}
     <div class="date-nav" style="margin-bottom:20px">
       <button class="btn btn-ghost btn-sm" id="mtg-prev">◀</button>
-      <input type="date" id="mtg-date" value="${meetingsDate}">
+      <input type="date" id="mtg-date" value="${meetingsDate}" max="${localToday()}">
       <button class="btn btn-ghost btn-sm" id="mtg-next">▶</button>
       <span style="margin-left:12px;color:var(--text-muted);font-size:0.85rem" id="mtg-count"></span>
       <span class="hint-trigger" id="mtg-hint-trigger" style="display:none" title="">?</span>
       <span id="mtg-recording-status" style="margin-left:auto;font-size:0.82rem"></span>
     </div>
     <div id="meetings-list"><div class="spinner"></div></div>`;
-  $('#mtg-date').addEventListener('change', e => { meetingsDate = e.target.value; loadMeetings(); });
-  $('#mtg-prev').addEventListener('click', () => shiftMeetingsDate(-1));
-  $('#mtg-next').addEventListener('click', () => shiftMeetingsDate(1));
+  bindDateNav($('#mtg-date'), $('#mtg-prev'), $('#mtg-next'), d => { meetingsDate = d; loadMeetings(); });
+  meetingsDate = $('#mtg-date').value;
   loadMeetings();
   // Refresh status every 10s
   if (window._mtgRefresh) clearInterval(window._mtgRefresh);
@@ -40,13 +39,6 @@ async function renderMeetings(el) {
   try {
     // No Whisper model selection needed — Gemma 4's native audio encoder is used
   } catch {}
-}
-
-function shiftMeetingsDate(days) {
-  const d = new Date(meetingsDate); d.setDate(d.getDate() + days);
-  meetingsDate = d.toISOString().split('T')[0];
-  $('#mtg-date').value = meetingsDate;
-  loadMeetings();
 }
 
 async function loadMeetings() {
