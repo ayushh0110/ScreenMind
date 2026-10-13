@@ -222,3 +222,70 @@ def test_summary_metrics_use_capped_gaps(monkeypatch):
     # Productive (coding) only: 40 + 30 + min(7170, 80)
     assert metrics["productive_hours"] == round((40 + 30 + 80) / 3600, 2)
     assert metrics["category_breakdown"] == {"coding": 3, "browsing": 1}
+
+
+# ── Files are deleted with their activities ───────────────────────────
+
+import pytest
+
+
+@pytest.fixture
+def data_dir(tmp_path, monkeypatch):
+    """Point settings at a temp data dir (screenshots/ and memos/ live here)."""
+    from screenmind.config import settings
+    monkeypatch.setattr(settings, "data_dir", str(tmp_path))
+    return tmp_path
+
+
+def _activity_with_files(db, data_dir, day, memo=False):
+    shot = data_dir / "screenshots" / day / "10-00-00.jpg"
+    shot.parent.mkdir(parents=True, exist_ok=True)
+    shot.write_bytes(b"jpg")
+    wav = None
+    details = "Editing code"
+    if memo:
+        wav = data_dir / "memos" / day / "memo_10-00-00.wav"
+        wav.parent.mkdir(parents=True, exist_ok=True)
+        wav.write_bytes(b"wav")
+        details = str(wav)
+    activity_id = db.insert_activity(ScreenshotEntry(
+        timestamp=datetime.fromisoformat(f"{day}T10:00:00"), screenshot_path=str(shot)))
+    db.update_activity_analysis(activity_id, ActivityRecord(detailed_context=details))
+    return shot, wav
+
+
+def test_delete_before_removes_screenshots(db, data_dir):
+    """delete_before used to leave every screenshot on disk."""
+    old_shot, _ = _activity_with_files(db, data_dir, "2026-05-01")
+    new_shot, _ = _activity_with_files(db, data_dir, "2026-05-20")
+    assert db.delete_before("2026-05-10") == 1
+    assert not old_shot.exists()
+    assert new_shot.exists()
+
+
+def test_retention_removes_memo_wavs_and_old_folders(db, data_dir):
+    from datetime import timedelta
+    old_day = (datetime.now() - timedelta(days=30)).strftime("%Y-%m-%d")
+    new_day = datetime.now().strftime("%Y-%m-%d")
+    old_shot, old_wav = _activity_with_files(db, data_dir, old_day, memo=True)
+    new_shot, new_wav = _activity_with_files(db, data_dir, new_day, memo=True)
+    # An orphan recording whose row was lost (e.g. crash) in an old folder
+    orphan = data_dir / "memos" / old_day / "memo_09-00-00.wav"
+    orphan.write_bytes(b"wav")
+
+    result = db.cleanup_old_data(7)
+
+    assert result["activities"] == 1
+    assert not old_shot.exists() and not old_wav.exists() and not orphan.exists()
+    assert not (data_dir / "memos" / old_day).exists()
+    assert not (data_dir / "screenshots" / old_day).exists()
+    assert new_shot.exists() and new_wav.exists()
+
+
+def test_retention_leaves_unrelated_folders(db, data_dir):
+    """Only YYYY-MM-DD folders are touched."""
+    keep = data_dir / "memos" / "imported"
+    keep.mkdir(parents=True)
+    (keep / "note.wav").write_bytes(b"wav")
+    db.cleanup_old_data(7)
+    assert (keep / "note.wav").exists()

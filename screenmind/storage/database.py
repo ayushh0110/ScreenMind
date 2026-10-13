@@ -653,23 +653,46 @@ class Database:
 
     # ── Cleanup ──────────────────────────────────────────────────────────
 
+    def _activity_files(self, where: str, params: tuple) -> list:
+        """(screenshot_path, details) of the activities matching `where`."""
+        return self._get_conn().execute(
+            f"SELECT screenshot_path, details FROM activities WHERE {where}", params
+        ).fetchall()
+
+    @staticmethod
+    def _delete_files(rows: list):
+        """Delete screenshots + memo WAVs for rows from _activity_files()."""
+        from screenmind.storage.files import delete_activity_files
+        for row in rows:
+            delete_activity_files(row["screenshot_path"], row["details"])
+
+    def delete_activity(self, activity_id: int) -> bool:
+        """Delete one activity and its files (screenshot, memo WAV). Returns True if found."""
+        rows = self._activity_files("id = ?", (activity_id,))
+        if not rows:
+            return False
+        conn = self._get_conn()
+        conn.execute("DELETE FROM activities WHERE id = ?", (activity_id,))
+        conn.commit()
+        self._delete_files(rows)
+        return True
+
     def delete_before(self, before_date: str) -> int:
-        """Delete all activities before a date. Returns count deleted."""
+        """Delete all activities before a date, with their files. Returns count deleted."""
+        rows = self._activity_files("DATE(timestamp) < ?", (before_date,))
         conn = self._get_conn()
         cursor = conn.execute(
             "DELETE FROM activities WHERE DATE(timestamp) < ?", (before_date,)
         )
         conn.commit()
+        self._delete_files(rows)
         return cursor.rowcount
 
     def delete_by_date(self, target_date: str) -> int:
-        """Delete all activities for a specific date. Also removes screenshot files. Returns count deleted."""
+        """Delete all activities for a specific date, with their files. Returns count deleted."""
         conn = self._get_conn()
-        # Get screenshot paths before deleting so we can remove files
-        rows = conn.execute(
-            "SELECT screenshot_path FROM activities WHERE DATE(timestamp) = ?",
-            (target_date,),
-        ).fetchall()
+        # Get file paths before deleting so we can remove files
+        rows = self._activity_files("DATE(timestamp) = ?", (target_date,))
         # Delete from DB
         cursor = conn.execute(
             "DELETE FROM activities WHERE DATE(timestamp) = ?", (target_date,)
@@ -683,14 +706,8 @@ class Database:
             "DELETE FROM meetings WHERE DATE(start_time) = ?", (target_date,)
         )
         conn.commit()
-        # Remove screenshot files from disk
-        for row in rows:
-            try:
-                p = Path(row["screenshot_path"])
-                if p.exists():
-                    p.unlink()
-            except (OSError, PermissionError) as e:
-                logger.debug("Cleanup skipped: %s", e)
+        # Remove screenshots and voice memo recordings from disk
+        self._delete_files(rows)
         return cursor.rowcount
 
     def get_disk_usage(self) -> Dict[str, Any]:
@@ -713,22 +730,21 @@ class Database:
     def cleanup_old_data(self, retention_days: int) -> Dict[str, int]:
         """
         Delete all activities and meetings older than retention_days.
-        Also removes screenshot files from disk.
+        Also removes their screenshots and voice memo recordings from disk,
+        including leftover date folders older than the cutoff.
         Returns counts of deleted items.
         """
         if retention_days <= 0:
             return {"activities": 0, "meetings": 0}
 
         from datetime import datetime, timedelta
+        from screenmind.storage.files import memos_dir, remove_date_dirs
         cutoff = (datetime.now() - timedelta(days=retention_days)).strftime("%Y-%m-%d")
 
         conn = self._get_conn()
 
-        # Get screenshot paths before deleting
-        rows = conn.execute(
-            "SELECT screenshot_path FROM activities WHERE DATE(timestamp) < ?",
-            (cutoff,),
-        ).fetchall()
+        # Get file paths before deleting
+        rows = self._activity_files("DATE(timestamp) < ?", (cutoff,))
 
         # Delete old activities
         act_cursor = conn.execute(
@@ -749,23 +765,11 @@ class Database:
 
         conn.commit()
 
-        # Remove screenshot files from disk
-        for row in rows:
-            try:
-                p = Path(row["screenshot_path"])
-                if p.exists():
-                    p.unlink()
-            except (OSError, PermissionError) as e:
-                logger.debug("Cleanup skipped: %s", e)
-
-        # Clean up empty date directories
-        if settings.screenshots_dir.exists():
-            for d in settings.screenshots_dir.iterdir():
-                if d.is_dir() and not any(d.iterdir()):
-                    try:
-                        d.rmdir()
-                    except (OSError, PermissionError) as e:
-                        logger.debug("Could not remove empty dir: %s", e)
+        # Remove screenshots + memo WAVs, then any date folders past retention
+        # (catches files whose rows were lost, e.g. after a crash)
+        self._delete_files(rows)
+        remove_date_dirs(settings.screenshots_dir, before_date=cutoff)
+        remove_date_dirs(memos_dir(), before_date=cutoff)
 
         return {"activities": activities_deleted, "meetings": meetings_deleted}
 

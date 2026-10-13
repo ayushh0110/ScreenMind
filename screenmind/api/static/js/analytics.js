@@ -29,10 +29,16 @@ function _analyticsRangeDates(range) {
   return { from: shiftLocalDate(to, -days), to };
 }
 
+// Increments per request so a slow response for an old range can't
+// overwrite the range the user clicked last
+let _analyticsRequestId = 0;
+
 async function loadAnalytics(range) {
+  const requestId = ++_analyticsRequestId;
   try {
     const { from, to } = _analyticsRangeDates(range);
     const data = await api(`/api/stats?date_from=${from}&date_to=${to}`);
+    if (requestId !== _analyticsRequestId) return;  // a newer range was selected
     const cats = data.category_breakdown || {};
     const apps = data.top_apps || {};
     const total = data.total_activities || 0;

@@ -9,6 +9,7 @@ from PIL import Image
 
 import screenmind.api.dependencies as deps
 from screenmind.engine import voice_memo
+from screenmind.storage import files
 from screenmind.storage.models import ActivityRecord, ScreenshotEntry
 
 
@@ -16,7 +17,7 @@ from screenmind.storage.models import ActivityRecord, ScreenshotEntry
 def memos_dir(tmp_path, monkeypatch):
     d = tmp_path / "memos"
     (d / "2026-10-13").mkdir(parents=True)
-    monkeypatch.setattr(voice_memo, "memos_dir", lambda: d)
+    monkeypatch.setattr(files, "memos_dir", lambda: d)
     return d
 
 
@@ -45,26 +46,26 @@ def _memo_row(db, wav_path, summary="old summary"):
 
 class TestMemoWavPath:
     def test_wav_inside_memos_dir(self, wav_file):
-        assert voice_memo.memo_wav_path(str(wav_file)) == wav_file.resolve()
+        assert files.memo_wav_path(str(wav_file)) == wav_file.resolve()
 
     def test_missing_file_still_recognized(self, memos_dir):
         """A deleted WAV is still a memo path — callers report it as missing."""
         path = memos_dir / "2026-10-13" / "gone.wav"
-        assert voice_memo.memo_wav_path(str(path)) == path.resolve()
+        assert files.memo_wav_path(str(path)) == path.resolve()
 
     def test_wav_outside_memos_dir(self, tmp_path, memos_dir):
-        assert voice_memo.memo_wav_path(str(tmp_path / "elsewhere.wav")) is None
+        assert files.memo_wav_path(str(tmp_path / "elsewhere.wav")) is None
 
     def test_traversal_out_of_memos_dir(self, memos_dir):
         sneaky = memos_dir / ".." / "secret.wav"
-        assert voice_memo.memo_wav_path(str(sneaky)) is None
+        assert files.memo_wav_path(str(sneaky)) is None
 
     @pytest.mark.parametrize("details", [
         None, "", "Editing auth_middleware.py in VS Code. The user is reviewing a PR.",
         "notes.txt",
     ])
     def test_screenshot_details(self, details, memos_dir):
-        assert voice_memo.memo_wav_path(details) is None
+        assert files.memo_wav_path(details) is None
 
 
 # ── save_voice_memo / retranscribe_memo ────────────────────────────────
@@ -241,3 +242,46 @@ class TestMemoAudioEndpoint:
         activity_id = _memo_row(db, stray)
         resp = await client.get(f"/api/memos/{activity_id}/audio")
         assert resp.status_code == 404
+
+
+# ── is_voice_memo flag + file cleanup on delete ───────────────────────
+
+@pytest.mark.asyncio
+class TestVoiceMemoFlag:
+    async def test_activity_and_timeline_report_memo_flag(self, client, db, wav_file):
+        memo_id = _memo_row(db, wav_file)
+        shot_id = db.insert_activity(ScreenshotEntry(timestamp=datetime.now(), screenshot_path="/tmp/s.jpg"))
+        db.update_activity_analysis(shot_id, ActivityRecord(detailed_context="Editing song.wav in Audacity"))
+
+        assert (await client.get(f"/api/activity/{memo_id}")).json()["is_voice_memo"] is True
+        assert (await client.get(f"/api/activity/{shot_id}")).json()["is_voice_memo"] is False
+
+        today = str(datetime.now().date())
+        flags = {a["id"]: a["is_voice_memo"]
+                 for a in (await client.get(f"/api/timeline?date={today}")).json()["activities"]}
+        assert flags == {memo_id: True, shot_id: False}
+
+
+@pytest.mark.asyncio
+class TestDeleteRemovesFiles:
+    async def test_delete_memo_removes_wav_and_screenshot(self, client, db, wav_file, tmp_path):
+        shot = tmp_path / "shot.jpg"
+        shot.write_bytes(b"jpg")
+        memo_id = _memo_row(db, wav_file)
+        db._get_conn().execute("UPDATE activities SET screenshot_path = ? WHERE id = ?", (str(shot), memo_id))
+        db._get_conn().commit()
+
+        resp = await client.delete(f"/api/activities/{memo_id}")
+        assert resp.status_code == 200
+        assert not wav_file.exists()
+        assert not shot.exists()
+
+    async def test_delete_missing_activity_404(self, client):
+        assert (await client.delete("/api/activities/999999")).status_code == 404
+
+    async def test_clear_timeline_removes_memo_wavs(self, client, db, wav_file):
+        _memo_row(db, wav_file)
+        today = str(datetime.now().date())
+        resp = await client.delete(f"/api/timeline/clear?date={today}")
+        assert resp.json()["deleted"] == 1
+        assert not wav_file.exists()

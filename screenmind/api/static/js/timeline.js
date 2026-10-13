@@ -35,6 +35,7 @@ async function renderTimeline(el) {
 
 async function loadTimeline(silent = false) {
   const list = $('#timeline-list');
+  if (!list) return;  // timeline not on screen (card actions are shared with Bookmarks)
   if (!silent) list.innerHTML = '<div class="spinner"></div>';
   try {
     const data = await api(`/api/timeline?date=${currentDate}`);
@@ -150,8 +151,8 @@ function timelineCard(a, i) {
           <button class="menu-item bookmark-item ${bookmarkClass}" onclick="event.stopPropagation(); toggleBookmark(${a.id}, this)">
             <span class="menu-icon">${a.bookmarked ? '★' : '☆'}</span> ${bookmarkLabel}
           </button>
-          <button class="menu-item reanalyze-item" onclick="event.stopPropagation(); reanalyzeActivity(${a.id}, this)">
-            <span class="menu-icon">↻</span> Re-analyze
+          <button class="menu-item reanalyze-item" onclick="event.stopPropagation(); reanalyzeActivity(${a.id}, this, ${!!a.is_voice_memo})">
+            <span class="menu-icon">↻</span> ${a.is_voice_memo ? 'Re-transcribe' : 'Re-analyze'}
           </button>
           <div class="menu-divider"></div>
           <button class="menu-item delete-item" onclick="event.stopPropagation(); deleteActivity(${a.id}, this)">
@@ -188,31 +189,29 @@ window.toggleBookmark = async function(id, el) {
     el.closest('.card-menu').classList.remove('open');
     el.closest('.card-menu-wrap').querySelector('.card-menu-trigger').classList.remove('active');
     showToast(data.bookmarked ? '⭐ Bookmarked!' : 'Bookmark removed', data.bookmarked ? 'success' : 'info');
-    loadTimeline(true);
+    _refreshActivityList();
   } catch {}
 };
 
-window.reanalyzeActivity = async function(id, el) {
+// Re-analyze a screenshot, or re-transcribe a voice memo (the server decides)
+window.reanalyzeActivity = async function(id, el, isVoiceMemo = false) {
   el.closest('.card-menu').classList.remove('open');
   el.closest('.card-menu-wrap').querySelector('.card-menu-trigger').classList.remove('active');
-  showToast('↻ Re-analyzing...', 'info');
+  const verb = isVoiceMemo ? 'Re-transcription' : 'Re-analysis';
+  showToast(isVoiceMemo ? '↻ Re-transcribing voice memo...' : '↻ Re-analyzing...', 'info');
   try {
     await _postReanalyze(id);
-    showToast('✓ Re-analysis complete!', 'success');
-    loadTimeline(true);
+    showToast(`✓ ${verb} complete!`, 'success');
+    _refreshActivityList();
   } catch (err) {
-    showToast('Re-analysis failed: ' + err.message, 'warning');
+    showToast(`${verb} failed: ` + err.message, 'warning');
   }
 };
 
-// POST /reanalyze and surface the server's error detail (e.g. "Audio file not found")
-async function _postReanalyze(id) {
-  const r = await fetch(`/api/activities/${id}/reanalyze`, { method: 'POST' });
-  if (!r.ok) {
-    const body = await r.json().catch(() => ({}));
-    throw new Error(body.detail || `HTTP ${r.status}`);
-  }
-  return r.json();
+// Card actions are shared by Timeline and Bookmarks — reload whichever is shown
+function _refreshActivityList() {
+  if (currentView === 'bookmarks') loadBookmarks();
+  else loadTimeline(true);
 }
 
 window.deleteActivity = async function(id, btn) {
@@ -234,9 +233,13 @@ window.deleteActivity = async function(id, btn) {
     if (!r.ok) throw new Error('Failed');
     setTimeout(function() { card.remove(); }, 300);
     showToast('Activity deleted', 'success');
-    const count = document.querySelectorAll('.timeline-item').length - 1;
-    const countEl = $('#tl-count');
-    if (countEl) countEl.textContent = `${count} activities`;
+    if (currentView === 'bookmarks') {
+      setTimeout(loadBookmarks, 300);  // after the slide-out animation
+    } else {
+      const count = document.querySelectorAll('.timeline-item').length - 1;
+      const countEl = $('#tl-count');
+      if (countEl) countEl.textContent = `${count} activities`;
+    }
   } catch (err) {
     card.style.transform = ''; card.style.opacity = '';
     showToast('Delete failed', 'warning');

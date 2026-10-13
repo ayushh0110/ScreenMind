@@ -15,7 +15,6 @@ from datetime import datetime
 from pathlib import Path
 from typing import Callable, Optional
 
-from screenmind.config import settings
 from screenmind.engine import llm_client
 from screenmind.storage.models import ActivityRecord, ScreenshotEntry
 
@@ -28,31 +27,6 @@ FALLBACK_FAILED = "Voice memo (transcription failed)"
 
 # Shorter transcripts are treated as empty (noise, a single filler word)
 _MIN_TRANSCRIPT_CHARS = 3
-
-
-def memos_dir() -> Path:
-    """Directory where voice memo WAV files are stored."""
-    return settings.data_path / "memos"
-
-
-def memo_wav_path(details: Optional[str]) -> Optional[Path]:
-    """Return the memo WAV path stored in an activity's details, or None.
-
-    Screenshot activities keep Gemma's free-text description in `details`,
-    so a value only counts as a memo when it is a .wav path that resolves
-    inside the memos directory. The file itself may no longer exist.
-    """
-    if not details or not isinstance(details, str):
-        return None
-    text = details.strip()
-    if not text.lower().endswith(".wav"):
-        return None
-    try:
-        path = Path(text).resolve()
-        path.relative_to(memos_dir().resolve())
-    except (ValueError, OSError):
-        return None
-    return path
 
 
 def transcribe(wav_bytes: bytes) -> str:

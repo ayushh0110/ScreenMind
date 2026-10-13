@@ -8,6 +8,8 @@ from fastapi import APIRouter, HTTPException, Query
 
 from screenmind.config import settings
 from screenmind.api.dependencies import db
+from screenmind.api.serializers import add_display_fields
+from screenmind.storage.files import memo_wav_path
 
 router = APIRouter(prefix="/api", tags=["timeline"])
 
@@ -25,8 +27,7 @@ async def get_timeline(
     if since:
         activities = [a for a in activities if a.get("timestamp", "") >= since]
     for a in activities:
-        if a.get("screenshot_path"):
-            a["screenshot_url"] = f"/api/screenshot/{a['id']}"
+        add_display_fields(a)
     return {"date": target_date, "activities": activities}
 
 
@@ -36,32 +37,14 @@ async def get_activity(activity_id: int):
     activity = db.get_activity_by_id(activity_id)
     if not activity:
         raise HTTPException(status_code=404, detail="Activity not found")
-    if activity.get("screenshot_path"):
-        activity["screenshot_url"] = f"/api/screenshot/{activity['id']}"
-    return activity
+    return add_display_fields(activity)
 
 
 @router.delete("/activities/{activity_id}")
 async def delete_activity(activity_id: int):
-    """Delete a single activity and its screenshot."""
-    conn = db._get_conn()
-    row = conn.execute(
-        "SELECT screenshot_path FROM activities WHERE id = ?", (activity_id,)
-    ).fetchone()
-    if not row:
+    """Delete a single activity with its screenshot and, for memos, the recording."""
+    if not db.delete_activity(activity_id):
         raise HTTPException(status_code=404, detail="Activity not found")
-
-    # Delete screenshot file
-    ss_path = row[0] if row else None
-    if ss_path and Path(ss_path).exists():
-        try:
-            Path(ss_path).unlink()
-        except OSError:
-            pass
-
-    # Delete from DB
-    conn.execute("DELETE FROM activities WHERE id = ?", (activity_id,))
-    conn.commit()
     return {"deleted": True, "activity_id": activity_id}
 
 
@@ -119,7 +102,6 @@ async def reanalyze_activity(activity_id: int):
     if not row:
         raise HTTPException(status_code=404, detail="Activity not found")
 
-    from screenmind.engine.voice_memo import memo_wav_path
     wav_path = memo_wav_path(row["details"])
     if wav_path is not None:
         return await _retranscribe_voice_memo(activity_id, wav_path)
@@ -131,7 +113,6 @@ async def reanalyze_activity(activity_id: int):
     from PIL import Image as _Image
     from screenmind.engine.analyzer import GemmaAnalyzer
     from screenmind.engine.layout_analyzer import organize_ocr_text, cluster_ocr_layout
-    from screenmind.config import settings as app_settings
 
     try:
         from screenmind.privacy.encryption import open_image as _enc_open
@@ -153,7 +134,7 @@ async def reanalyze_activity(activity_id: int):
                 "balanced": analyzer.analyze_screenshot_balanced,
                 "merged": analyzer.analyze_screenshot,
             }
-            analyze_fn = _MODE_MAP.get(app_settings.analysis_mode, analyzer.analyze_screenshot_fast)
+            analyze_fn = _MODE_MAP.get(settings.analysis_mode, analyzer.analyze_screenshot_fast)
             record, layout_regions = await asyncio.wait_for(
                 asyncio.get_event_loop().run_in_executor(
                     None,

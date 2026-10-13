@@ -42,7 +42,7 @@ async def list_memos(
 @router.get("/{memo_id}/audio")
 async def get_memo_audio(memo_id: int):
     """Serve the WAV audio file for a voice memo."""
-    from screenmind.engine.voice_memo import memo_wav_path
+    from screenmind.storage.files import memo_wav_path
 
     activity = db.get_activity_by_id(memo_id)
     if not activity:
