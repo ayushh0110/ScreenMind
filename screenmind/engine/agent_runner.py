@@ -266,6 +266,19 @@ def _parse_interval_seconds(schedule: str) -> int:
 
 # ── Execution ────────────────────────────────────────────────────────
 
+# Upper bound per meeting summary injected into an agent prompt
+_MEETING_SUMMARY_MAX_CHARS = 600
+
+
+def _hhmm(timestamp: Optional[str]) -> str:
+    """HH:MM from an ISO timestamp. Stored timestamps may include
+    microseconds, so string slicing can't be used."""
+    try:
+        return datetime.fromisoformat(timestamp).strftime("%H:%M")
+    except (TypeError, ValueError):
+        return "??:??"
+
+
 def _run_markdown_agent(agent: dict) -> str:
     """Execute a markdown agent by calling Gemma with injected screen data.
 
@@ -346,12 +359,16 @@ def _run_markdown_agent(agent: dict) -> str:
         try:
             meetings = db.get_meetings_by_date(str(datetime.now().date()))
             if meetings:
+                shown = meetings[:5]
+                # Share the remaining budget so agents (e.g. meeting-actions)
+                # see enough of each structured summary to find action items
+                per_meeting = max(80, min(_MEETING_SUMMARY_MAX_CHARS, remaining // len(shown) - 40))
                 mtg_lines = []
-                for m in meetings[:5]:
-                    start = m.get("start_time", "?")[-8:-3]  # HH:MM
+                for m in shown:
+                    start = _hhmm(m.get("start_time"))
                     app = m.get("app_name", "?")
                     dur = m.get("duration_minutes", 0)
-                    summ = (m.get("summary") or "No summary")[:80]
+                    summ = " ".join((m.get("summary") or "No summary").split())[:per_meeting]
                     mtg_lines.append(f"- {start} {app} ({dur}min): {summ}")
                 s = "### Meetings Today\n" + "\n".join(mtg_lines)
                 sections.append(s)
@@ -375,7 +392,7 @@ def _run_markdown_agent(agent: dict) -> str:
         max_items = max(remaining // 80, 3)  # ~80 chars per line
         timeline_lines = []
         for a in analyzed[:max_items]:
-            ts = a.get("timestamp", "")[-8:-3]  # HH:MM
+            ts = _hhmm(a.get("timestamp"))
             app = a.get("app_name", "?")
             cat = a.get("category", "?")
             summary = (a.get("summary") or "")[:60]
