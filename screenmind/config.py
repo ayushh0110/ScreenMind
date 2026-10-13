@@ -10,6 +10,8 @@ import logging
 import os
 import sys
 import threading
+import time
+from datetime import datetime
 from pathlib import Path
 from typing import List, Literal, Optional
 
@@ -123,6 +125,44 @@ def _migrate_overrides(overrides: dict) -> dict:
 
 # Lock to prevent concurrent read-modify-write races on settings.json
 _settings_lock = threading.Lock()
+
+
+def _read_settings_file(path: Path) -> dict:
+    """Read settings.json for an update. Caller holds _settings_lock.
+
+    A corrupt file is moved aside (settings.json.corrupt-<timestamp>) rather
+    than silently overwritten, so the user's settings can be recovered.
+    """
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+        if isinstance(data, dict):
+            return data
+        reason = f"expected a JSON object, got {type(data).__name__}"
+    except (OSError, ValueError) as e:
+        reason = str(e)
+    backup = path.with_name(f"{path.name}.corrupt-{datetime.now():%Y%m%d-%H%M%S}")
+    try:
+        os.replace(path, backup)
+        logger.error(f"settings.json was unreadable ({reason}); moved to {backup.name}, starting fresh")
+    except OSError as e:
+        logger.error(f"settings.json was unreadable ({reason}) and could not be backed up: {e}")
+    return {}
+
+
+def _write_json_atomic(path: Path, data: dict):
+    """Write JSON via a temp file + rename, so a crash mid-write can't leave
+    a truncated settings.json behind."""
+    tmp = path.with_name(path.name + ".tmp")
+    tmp.write_text(json.dumps(data, indent=2), encoding="utf-8")
+    # On Windows the rename can briefly fail while antivirus/indexers hold the file
+    for attempt in range(5):
+        try:
+            os.replace(tmp, path)
+            return
+        except PermissionError:
+            if attempt == 4:
+                raise
+            time.sleep(0.1)
 
 class Settings(BaseSettings):
     """Application settings loaded from environment / .env file."""
@@ -387,7 +427,9 @@ class Settings(BaseSettings):
         if path.exists():
             try:
                 with _settings_lock:
-                    overrides = json.loads(path.read_text())
+                    overrides = json.loads(path.read_text(encoding="utf-8"))
+                if not isinstance(overrides, dict):
+                    raise ValueError(f"expected a JSON object, got {type(overrides).__name__}")
                 for k, v in overrides.items():
                     if k in _ALLOWED_OVERRIDES and hasattr(self, k):
                         try:
@@ -412,12 +454,7 @@ class Settings(BaseSettings):
         """Save dashboard settings to settings.json."""
         with _settings_lock:
             path = self.settings_json_path
-            existing = {}
-            if path.exists():
-                try:
-                    existing = json.loads(path.read_text())
-                except Exception as e:
-                    logger.debug("Could not read existing settings.json: %s", e)
+            existing = _read_settings_file(path) if path.exists() else {}
             for k, v in updates.items():
                 if k in _ALLOWED_OVERRIDES:
                     existing[k] = v
@@ -430,7 +467,7 @@ class Settings(BaseSettings):
             # so a later load never re-runs migrations over the user's choices.
             existing["settings_schema_version"] = SETTINGS_SCHEMA_VERSION
             self.settings_schema_version = SETTINGS_SCHEMA_VERSION
-            path.write_text(json.dumps(existing, indent=2))
+            _write_json_atomic(path, existing)
 
 
 # Singleton instance

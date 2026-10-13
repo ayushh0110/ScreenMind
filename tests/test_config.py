@@ -120,3 +120,31 @@ class TestJwtFilterRestore:
         s = _settings_with_file(tmp_path)
         s.save_runtime_overrides({"capture_interval": 30})
         assert _file(s)["settings_schema_version"] == SETTINGS_SCHEMA_VERSION
+
+
+class TestSettingsFileSafety:
+    def test_write_is_atomic_no_temp_left(self, tmp_path):
+        s = _settings_with_file(tmp_path, {"capture_interval": 60})
+        s.save_runtime_overrides({"capture_interval": 30})
+        assert _file(s)["capture_interval"] == 30
+        assert not (tmp_path / "settings.json.tmp").exists()
+
+    def test_corrupt_file_is_backed_up_not_lost(self, tmp_path):
+        """A truncated file used to be silently replaced by {} on the next save."""
+        s = Settings(data_dir=str(tmp_path))
+        s.settings_json_path.write_text('{"capture_interval": 60, "webhook_url": "https://ex', encoding="utf-8")
+        s.load_runtime_overrides()          # logs the error, keeps defaults
+        s.save_runtime_overrides({"capture_interval": 30})
+
+        backups = list(tmp_path.glob("settings.json.corrupt-*"))
+        assert len(backups) == 1
+        assert "webhook_url" in backups[0].read_text(encoding="utf-8")
+        assert _file(s)["capture_interval"] == 30
+
+    def test_non_object_json_treated_as_corrupt(self, tmp_path):
+        s = Settings(data_dir=str(tmp_path))
+        s.settings_json_path.write_text("[1, 2, 3]", encoding="utf-8")
+        s.load_runtime_overrides()
+        s.save_runtime_overrides({"capture_interval": 30})
+        assert _file(s)["capture_interval"] == 30
+        assert list(tmp_path.glob("settings.json.corrupt-*"))
