@@ -37,5 +37,9 @@ easyocr==1.7.2
 # ── Optional: Windows Accessibility ──
 uiautomation==2.0.18 ; sys_platform == "win32"
 
+# ── macOS: window detection (Quartz) + accessibility text ──
+pyobjc-framework-Quartz>=10.0 ; sys_platform == "darwin"
+pyobjc-framework-ApplicationServices>=10.0 ; sys_platform == "darwin"
+
 # ── Optional: MCP Server ──
 mcp[cli]==1.26.0

@@ -45,6 +45,9 @@ _URL_RE = re.compile(
     r'(?:www\.)[^\s<>"\']+'    # www. prefixed URLs
     , re.IGNORECASE
 )
+# Only live captures drive notifications about what the user is doing now
+FOCUS_CHECK_MAX_AGE_SECONDS = 180
+
 # Common noise URLs that aren't the "active page"
 _URL_NOISE = {'http://localhost', 'http://127.0.0.1', 'https://fonts.googleapis.com',
               'https://cdn.', 'http://schemas.', 'chrome-extension://'}
@@ -644,14 +647,11 @@ class AnalysisWorker:
                 status="failed",
             )
 
-    # Only live captures should drive notifications about what the user is doing now
-    _FOCUS_CHECK_MAX_AGE = 180
-
     def _check_focus(self, capture: CaptureResult, category: str):
         """Run the focus-streak notification for a freshly analyzed capture."""
         if self._is_backfill:
             return
-        if (datetime.now() - capture.timestamp).total_seconds() > self._FOCUS_CHECK_MAX_AGE:
+        if (datetime.now() - capture.timestamp).total_seconds() > FOCUS_CHECK_MAX_AGE_SECONDS:
             return
         try:
             from screenmind.integrations.smart_notify import check_focus
