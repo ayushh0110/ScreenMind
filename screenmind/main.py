@@ -246,8 +246,10 @@ async def main():
     voice_recorder = VoiceRecorder()
 
     def _on_bookmark():
-        capture_worker.trigger_bookmark()
-        show_overlay_notification("📌 Bookmarked", "Screenshot captured and bookmarked", duration=2.5, color="#10b981")
+        if capture_worker.trigger_bookmark():
+            show_overlay_notification("📌 Bookmarked", "Screenshot captured and bookmarked", duration=2.5, color="#10b981")
+        else:
+            show_overlay_notification("🕶️ Incognito", "Nothing is captured while incognito is on", duration=2.5, color="#f59e0b")
 
     def _toggle_pause():
         if capture_worker.is_paused:

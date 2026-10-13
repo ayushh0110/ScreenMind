@@ -2,17 +2,27 @@
 Browser identification shared by the analyzer and meeting detection.
 
 The OS reports browsers differently per platform:
-  - Windows / Linux: process name ("msedge", "chrome", "firefox")
+  - Windows / Linux X11: process name ("msedge", "chrome", "firefox")
+  - Linux Wayland: compositor app ID / window class ("google-chrome")
   - macOS: window owner / app name ("Microsoft Edge", "Google Chrome")
 """
 
 from typing import Optional
 
-# Windows / Linux process names
+# Windows process names (without .exe) and Linux X11 /proc/<pid>/comm values.
+# Linux truncates comm to 15 chars: "chromium-browser" → "chromium-browse".
 _PROCESS_NAMES = {
-    "chrome", "chromium", "firefox", "firefox-esr",
+    "chrome", "chromium", "chromium-browse", "firefox", "firefox-esr",
     "brave", "opera", "safari", "vivaldi", "arc",
     "msedge",
+}
+
+# Linux Wayland app IDs (sway/niri app_id, Hyprland class), incl. Flatpak IDs
+_WAYLAND_APP_IDS = {
+    "google-chrome", "google-chrome-stable", "chromium-browser",
+    "microsoft-edge", "microsoft-edge-stable", "brave-browser",
+    "com.google.chrome", "org.chromium.chromium", "com.microsoft.edge",
+    "com.brave.browser", "org.mozilla.firefox",
 }
 
 # macOS app names (as reported by the window owner)
@@ -21,15 +31,19 @@ _MACOS_APP_NAMES = {
     "safari", "firefox", "arc",
 }
 
-BROWSER_NAMES = frozenset(_PROCESS_NAMES | _MACOS_APP_NAMES)
+BROWSER_NAMES = frozenset(_PROCESS_NAMES | _WAYLAND_APP_IDS | _MACOS_APP_NAMES)
 
 _LABELS = {
-    "chrome": "Chrome", "google chrome": "Chrome",
-    "msedge": "Edge", "microsoft edge": "Edge",
-    "firefox": "Firefox", "firefox-esr": "Firefox",
-    "brave": "Brave", "brave browser": "Brave",
-    "safari": "Safari", "arc": "Arc", "opera": "Opera",
-    "vivaldi": "Vivaldi", "chromium": "Chromium",
+    "chrome": "Chrome", "google chrome": "Chrome", "google-chrome": "Chrome",
+    "google-chrome-stable": "Chrome", "com.google.chrome": "Chrome",
+    "msedge": "Edge", "microsoft edge": "Edge", "microsoft-edge": "Edge",
+    "microsoft-edge-stable": "Edge", "com.microsoft.edge": "Edge",
+    "firefox": "Firefox", "firefox-esr": "Firefox", "org.mozilla.firefox": "Firefox",
+    "brave": "Brave", "brave browser": "Brave", "brave-browser": "Brave",
+    "com.brave.browser": "Brave",
+    "chromium": "Chromium", "chromium-browser": "Chromium",
+    "chromium-browse": "Chromium", "org.chromium.chromium": "Chromium",
+    "safari": "Safari", "arc": "Arc", "opera": "Opera", "vivaldi": "Vivaldi",
 }
 
 

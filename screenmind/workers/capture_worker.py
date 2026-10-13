@@ -20,6 +20,7 @@ from screenmind.capture.dedup import ScreenDeduplicator
 from screenmind.capture.window import get_active_window_title, get_active_app_name
 from screenmind.config import settings
 from screenmind.engine.a11y_extractor import A11yExtractor
+from screenmind.engine.browsers import is_browser
 from screenmind.storage.models import ScreenshotEntry
 
 logger = logging.getLogger("screenmind.workers.capture_worker")
@@ -64,6 +65,9 @@ class CaptureWorker:
         self._pending_bookmark = False
         self._last_save_time = 0.0
         self._consecutive_skips = 0  # Track idle state
+        self._audio_worker = None  # Set by main.py for meeting detection
+        # Incognito: nothing is recorded — no captures, bookmarks or meetings
+        self.incognito = False
 
     async def run(self):
         """
@@ -82,17 +86,18 @@ class CaptureWorker:
 
         while self._running:
             # Handle pending bookmark captures
-            if hasattr(self, '_pending_bookmark') and self._pending_bookmark:
+            if self._pending_bookmark:
                 self._pending_bookmark = False
                 await self._do_bookmark_capture()
 
-            # Meeting detection runs ALWAYS (even when paused). The title is
-            # needed for meetings inside a browser tab (e.g. Google Meet).
+            # Meeting detection runs even when capture is paused, but never in
+            # incognito. The window title is only needed (and only fetched)
+            # for browsers, where meetings like Google Meet run in a tab.
             try:
-                if hasattr(self, '_audio_worker') and self._audio_worker:
+                if self._audio_worker and not self.incognito:
                     _app = get_active_app_name()
                     if _app:
-                        _title = get_active_window_title()
+                        _title = get_active_window_title() if is_browser(_app) else None
                         await asyncio.get_event_loop().run_in_executor(
                             None, self._audio_worker.check_meeting, _app, _title
                         )
@@ -225,16 +230,34 @@ class CaptureWorker:
         except Exception as e:
             logger.error(f"Error: {e}")
 
-    def trigger_bookmark(self):
+    def trigger_bookmark(self) -> bool:
         """
-        Called by the hotkey listener. Triggers an immediate capture
-        with the bookmarked flag set. Thread-safe via asyncio.
+        Queue an immediate bookmarked capture (hotkey, dashboard, MCP, agents).
+        The capture loop picks it up on its next tick.
+
+        Returns False without capturing while incognito is on.
         """
-        try:
-            self._pending_bookmark = True
-            logger.info("Bookmark capture queued.")
-        except Exception as e:
-            logger.error(f"Bookmark error: {e}")
+        if self.incognito:
+            logger.info("Bookmark capture ignored (incognito).")
+            return False
+        self._pending_bookmark = True
+        logger.info("Bookmark capture queued.")
+        return True
+
+    def set_incognito(self, enabled: bool):
+        """Turn incognito on/off: pauses capture and suspends meeting recording.
+
+        Blocking: stopping an in-progress meeting waits for the recorder
+        thread, so call it off the event loop.
+        """
+        self.incognito = enabled
+        if enabled:
+            self._pending_bookmark = False
+            self.pause(source="incognito_on")
+        else:
+            self.resume(source="incognito_off")
+        if self._audio_worker:
+            self._audio_worker.set_suspended(enabled)
 
     async def _do_bookmark_capture(self):
         """Perform an immediate bookmarked capture."""
@@ -301,7 +324,16 @@ class CaptureWorker:
         logger.info(f"Paused. (source: {source})")
 
     def resume(self, source: str = "unknown"):
-        """Resume capture. Persists state to settings.json."""
+        """Resume capture. Persists state to settings.json.
+
+        Explicitly resuming (dashboard button, pause hotkey) also ends
+        incognito, so capture and incognito can't both be on.
+        """
+        if self.incognito:
+            self.incognito = False
+            if self._audio_worker:
+                self._audio_worker.set_suspended(False)
+            logger.info("Incognito off (capture resumed)")
         if not self._paused:
             return  # Already running — skip redundant persist + log
         self._paused = False

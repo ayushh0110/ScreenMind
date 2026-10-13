@@ -4,6 +4,7 @@ Auto-detects meeting apps, captures dual-channel audio (system + mic),
 transcribes with Gemma 4's native audio encoder, and generates meeting summaries.
 """
 
+import csv
 import io
 import logging
 import re
@@ -13,7 +14,7 @@ import time
 import threading
 import wave
 from datetime import datetime
-from typing import Optional, List
+from typing import List, Optional, Set, Tuple
 
 import numpy as np
 
@@ -23,9 +24,6 @@ from screenmind.storage.database import Database
 
 logger = logging.getLogger("screenmind.workers.audio_worker")
 
-
-# Meeting app keywords
-MEETING_APPS = None  # Loaded from settings at runtime
 
 # Grace period (seconds) — keep recording if user briefly switches away
 # Process-alive check handles native apps immediately; this is the safety-net timeout
@@ -47,23 +45,25 @@ PROBE_CONFIRM_WINDOW = 20    # probes must happen within N seconds to count as c
 AVAILABILITY_RECHECK_SECONDS = 30
 
 
-# Map meeting app keywords → native process names, per platform.
-# Browser-based meetings (Meet, web Teams) have no process → timeout only.
+# Extra process names per meeting-app keyword, per platform. The name the OS
+# reported for the meeting window is always watched too (see
+# _meeting_process_names); these cover apps whose window owner and process
+# differ, e.g. macOS reports "Microsoft Teams" but the process is "MSTeams".
 # Matching is exact on the executable's base name (case-insensitive), so an
 # editor with "discord" in a file path never counts as Discord running.
-_MEETING_PROCESSES = {
+_MEETING_PROCESS_ALIASES = {
     "win32": {
         "discord": ["Discord.exe"],
         "zoom": ["Zoom.exe"],
-        "teams": ["ms-teams.exe"],
-        "webex": ["webexmta.exe"],
+        "teams": ["ms-teams.exe", "Teams.exe"],
+        "webex": ["webexmta.exe", "CiscoCollabHost.exe"],
         "slack": ["slack.exe"],
     },
     "darwin": {
         "discord": ["Discord"],
         "zoom": ["zoom.us"],
         "teams": ["MSTeams", "Microsoft Teams"],
-        "webex": ["Webex"],
+        "webex": ["Webex", "Cisco Webex Meetings"],
         "slack": ["Slack"],
     },
     "linux": {  # Linux truncates process names to 15 chars; all fit
@@ -77,39 +77,52 @@ _MEETING_PROCESSES = {
 
 
 # Meetings running inside a browser tab are found by window title. Each
-# pattern applies only while its keyword is in settings.meeting_apps. They are
-# specific on purpose: a bare "meet" would also match "Meeting notes.docx" or
-# "Meet the team - Google Docs", and the voice probe would then start
-# recording the microphone.
+# pattern applies only while its keyword is in settings.meeting_apps.
+#
+# Patterns are anchored to how the services title their own tabs, because
+# matching a product name anywhere would also catch e.g. "How to use
+# Microsoft Teams - YouTube" — and a video's speech on the system audio passes
+# the voice probe, so it would be recorded as a meeting. Titles are
+# normalized first (see _normalize_title), so dashes are plain "-".
+_TITLE_END = r"(?:\s+-\s|$)"  # end of the page's own title, before " - <browser>"
 _BROWSER_MEETING_PATTERNS = [
-    ("meet", "Google Meet",
-     re.compile(r"\bgoogle meet\b|^meet\s*[-:]\s|meet\.google\.com", re.IGNORECASE)),
-    ("zoom", "Zoom",
-     re.compile(r"\bzoom (?:meeting|workplace|webinar)\b|app\.zoom\.us", re.IGNORECASE)),
-    ("teams", "Microsoft Teams",
-     re.compile(r"\bmicrosoft teams\b|teams\.(?:microsoft|live)\.com", re.IGNORECASE)),
-    ("webex", "Webex",
-     re.compile(r"\bwebex\b", re.IGNORECASE)),
+    # In-call tab "Meet - abc-defg-hij", landing/PWA "Google Meet", or the
+    # bare URL shown while the tab loads.
+    ("meet", "Google Meet", re.compile(
+        rf"^meet\s*[-:]\s|^google meet{_TITLE_END}|^meet\.google\.com/", re.IGNORECASE)),
+    # Zoom web client.
+    ("zoom", "Zoom", re.compile(
+        rf"^zoom (?:meeting|workplace|webinar){_TITLE_END}|^app\.zoom\.us/", re.IGNORECASE)),
+    # Teams web titles every page "<page> | Microsoft Teams".
+    ("teams", "Microsoft Teams", re.compile(
+        rf"\|\s*microsoft teams{_TITLE_END}|^microsoft teams{_TITLE_END}"
+        r"|^teams\.(?:microsoft|live)\.com/", re.IGNORECASE)),
+    ("webex", "Webex", re.compile(
+        rf"^(?:cisco\s+)?webex(?:\s+meetings?)?{_TITLE_END}", re.IGNORECASE)),
 ]
 
-# Edge puts a zero-width space inside "Microsoft​ Edge"; titles also mix
-# hyphens with en/em dashes.
-_ZERO_WIDTH_RE = re.compile("[​‌‍⁠﻿]")
-_DASH_RE = re.compile("[–—−]")
+# Edge inserts a zero-width space in "Microsoft Edge", and titles mix plain
+# hyphens with en/em dashes. Built from code points so they stay visible here.
+_ZERO_WIDTH_CHARS = "".join(map(chr, (0x200B, 0x200C, 0x200D, 0x2060, 0xFEFF)))
+_DASH_CHARS = "".join(map(chr, (0x2013, 0x2014, 0x2212)))  # en dash, em dash, minus
+_ZERO_WIDTH_RE = re.compile(f"[{_ZERO_WIDTH_CHARS}]")
+_DASH_RE = re.compile(f"[{_DASH_CHARS}]")
+_UNREAD_COUNT_RE = re.compile(r"^\(\d+\+?\)\s*")  # "(3) Chat | Microsoft Teams"
 
 
 def _normalize_title(title: str) -> str:
     title = _ZERO_WIDTH_RE.sub("", title)
     title = _DASH_RE.sub("-", title)
-    return " ".join(title.split())
+    title = " ".join(title.split())
+    return _UNREAD_COUNT_RE.sub("", title)
 
 
-def _detect_meeting(app_name: str, window_title: Optional[str]) -> Optional[tuple]:
+def _detect_meeting(app_name: str, window_title: Optional[str]) -> Optional[Tuple[str, bool]]:
     """Identify a meeting in the foreground window.
 
     Returns (label, in_browser) or None:
       - Native apps: the process name contains a meeting_apps keyword
-        ("Zoom.exe" → ("Zoom.exe", False)).
+        ("Zoom" → ("Zoom", False)).
       - Browsers: the window title matches a meeting service pattern
         ("Meet - abc-defg-hij - Microsoft Edge" → ("Google Meet (Edge)", True)).
     """
@@ -129,23 +142,44 @@ def _detect_meeting(app_name: str, window_title: Optional[str]) -> Optional[tupl
     return None
 
 
-def _meeting_process_names(app_name: str) -> Optional[List[str]]:
-    """Native process names to watch for a meeting app, or None if unknown."""
-    table = _MEETING_PROCESSES.get(sys.platform, _MEETING_PROCESSES["linux"])
-    app_lower = app_name.lower()
-    for key, names in table.items():
-        if key in app_lower:
-            return names
-    return None
+def _meeting_process_names(app_name: str) -> List[str]:
+    """Process names that mean a native meeting app is still running.
 
-
-def _running_process_names() -> set:
-    """Lowercased executable base names of all running processes (macOS/Linux).
-
-    `ps -A -o comm=` is the same on BSD (macOS) and procps (Linux), unlike
-    pgrep's flags. macOS prints full paths for app bundles, so take the last
-    path component.
+    Starts with the name the OS reported for the meeting window — ground
+    truth, rather than a guess — plus known aliases for that app.
     """
+    own = app_name.strip()
+    if sys.platform == "win32" and not own.lower().endswith(".exe"):
+        own += ".exe"  # the Windows adapter reports "Zoom" for Zoom.exe
+    names = [own]
+
+    table = _MEETING_PROCESS_ALIASES.get(sys.platform, _MEETING_PROCESS_ALIASES["linux"])
+    app_lower = app_name.lower()
+    for key, aliases in table.items():
+        if key in app_lower:
+            names += [a for a in aliases if a.lower() != own.lower()]
+            break
+    return names
+
+
+def _running_process_names() -> Set[str]:
+    """Lowercased executable base names of all running processes.
+
+    Windows: one `tasklist` call (CSV, image name first). macOS/Linux:
+    `ps -A -o comm=`, which behaves the same on BSD and procps, unlike pgrep's
+    flags; macOS prints full paths for app bundles, so take the last part.
+    """
+    if sys.platform == "win32":
+        result = subprocess.run(
+            ["tasklist", "/FO", "CSV", "/NH"],
+            capture_output=True, text=True, timeout=5,
+            # No console flash under pythonw (constant only exists on Windows)
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        )
+        if result.returncode != 0:
+            raise RuntimeError(f"tasklist exited with {result.returncode}")
+        return {row[0].lower() for row in csv.reader(result.stdout.splitlines()) if row}
+
     result = subprocess.run(
         ["ps", "-A", "-o", "comm="],
         capture_output=True, text=True, timeout=3,
@@ -175,6 +209,9 @@ class AudioWorker:
         self._running = False
         self._available = False
         self._last_availability_check: float = 0.0
+        self._unavailable_logged = False
+        # Suspended while incognito: no detection, probing, or recording
+        self._suspended = False
 
         # Session state
         self._in_meeting = False
@@ -194,6 +231,7 @@ class AudioWorker:
         self._last_probe_time: float = 0
         self._pending_meeting_app: Optional[str] = None
         self._pending_in_browser: bool = False
+        self._silence_logged_app: Optional[str] = None  # avoid repeating "no voice" logs
 
         # Confirmation state — require multiple consecutive voice probes
         self._consecutive_voice_probes: int = 0
@@ -224,7 +262,7 @@ class AudioWorker:
 
         if self._available and not was_available:
             logger.info("Gemma audio transcription ready (via llama-server).")
-        elif error and not getattr(self, "_unavailable_logged", False):
+        elif error and not self._unavailable_logged:
             logger.warning(f"{error} — meeting transcription disabled until it is reachable")
         self._unavailable_logged = not self._available
 
@@ -248,6 +286,24 @@ class AudioWorker:
     def in_meeting(self) -> bool:
         return self._in_meeting
 
+    @property
+    def is_suspended(self) -> bool:
+        return self._suspended
+
+    def set_suspended(self, suspended: bool):
+        """Stop (or resume) all meeting detection and recording.
+
+        Used by incognito mode, which promises that nothing is recorded:
+        suspending ends any recording in progress and blocks a probe that is
+        already running from starting a new one.
+        """
+        self._suspended = suspended
+        if suspended:
+            self._consecutive_voice_probes = 0
+            if self._in_meeting:
+                logger.info("Meeting recording stopped (incognito)")
+                self._stop_meeting()
+
     def check_meeting(self, app_name: str, window_title: Optional[str] = None):
         """
         Called by CaptureWorker every 5s with the foreground app name and
@@ -261,7 +317,7 @@ class AudioWorker:
         actual voice activity is found. The probe thread directly triggers
         meeting start for minimal delay (~2-3s from voice to recording).
         """
-        if not self.is_available or not app_name:
+        if self._suspended or not app_name or not self.is_available:
             return
 
         detected = _detect_meeting(app_name, window_title)
@@ -297,20 +353,11 @@ class AudioWorker:
             return True  # Browser-based → assume alive, rely on timeout
 
         try:
-            if sys.platform == "win32":
-                for name in self._meeting_process:
-                    result = subprocess.run(
-                        ["tasklist", "/FI", f"IMAGENAME eq {name}", "/NH"],
-                        capture_output=True, text=True, timeout=3,
-                    )
-                    if name.lower() in result.stdout.lower():
-                        return True
-                return False
-
             running = _running_process_names()
-            return any(name.lower() in running for name in self._meeting_process)
-        except Exception:
+        except Exception as e:
+            logger.debug(f"Process list unavailable: {e}")
             return True  # Assume alive on error — don't stop recording
+        return any(name.lower() in running for name in self._meeting_process)
 
     def _start_audio_probe(self):
         """Kick off a background audio probe to detect voice activity."""
@@ -400,7 +447,7 @@ class AudioWorker:
             else:
                 # No voice — reset confirmation counter
                 self._consecutive_voice_probes = 0
-                if not getattr(self, '_silence_logged_app', None) == self._pending_meeting_app:
+                if self._silence_logged_app != self._pending_meeting_app:
                     self._silence_logged_app = self._pending_meeting_app
                     logger.info(f"{self._pending_meeting_app} in foreground but no voice detected — skipping")
 
@@ -413,6 +460,10 @@ class AudioWorker:
                 watch (a "Microsoft Teams (Edge)" label must not map to
                 ms-teams.exe), so the end is detected by silence + timeout.
         """
+        # Guard: a probe that started before incognito was turned on
+        if self._suspended:
+            return
+
         # Guard: don't record if active model can't transcribe audio
         from screenmind.engine import model_manager
         if not model_manager.is_audio_capable():

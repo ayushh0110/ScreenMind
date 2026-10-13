@@ -187,3 +187,25 @@ async def test_generate_accepts_past_date_without_data(client):
     resp = await client.post("/api/summary/generate?date=2020-01-01")
     assert resp.status_code == 200
     assert "No activities" in resp.json()["summary"]["summary"]
+
+
+# ── Incognito ─────────────────────────────────────────────────────────
+
+@pytest.mark.asyncio
+async def test_incognito_blocks_bookmark_capture(client, monkeypatch):
+    import asyncio
+    from unittest.mock import patch
+    import screenmind.api.routes.capture as capture_route
+    from screenmind.workers.capture_worker import CaptureWorker
+
+    with patch("screenmind.config.Settings.save_runtime_overrides"):
+        worker = CaptureWorker(queue=asyncio.Queue())
+        monkeypatch.setattr(capture_route, "capture_worker", worker)
+
+        assert (await client.post("/api/incognito/toggle")).json() == {"incognito": True}
+        assert (await client.get("/api/status")).json()["incognito"] is True
+        resp = (await client.post("/api/capture/bookmark")).json()
+        assert resp["status"] == "error" and "Incognito" in resp["message"]
+
+        assert (await client.post("/api/incognito/toggle")).json() == {"incognito": False}
+        assert (await client.post("/api/capture/bookmark")).json()["status"] == "captured"
