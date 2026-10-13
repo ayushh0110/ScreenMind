@@ -119,7 +119,7 @@ async function renderAgents(el) {
       if (a.type === 'python') {
         html += '<button class="btn" style="font-size:0.75rem;padding:4px 10px" onclick="openAgentInEditor(\'' + (a.slug || a.name) + '\')">📂 Open in Editor</button>';
       }
-      if (a.type === 'python' && a.last_run && a.last_run.status === 'needs_approval') {
+      if (a.needs_approval) {
         html += '<button class="btn" style="font-size:0.75rem;padding:4px 10px;background:rgba(16,185,129,0.15);color:#10b981" onclick="approveAgent(\'' + (a.slug || a.name) + '\')">✅ Approve & Run</button>';
       }
       html += '<button class="btn" style="font-size:0.75rem;padding:4px 10px;margin-left:auto;color:#ef4444" onclick="confirmDeleteAgent(\'' + (a.slug || a.name) + '\', \'' + (a.name || a.slug).replace(/'/g,'') + '\')">🗑️ Delete</button>';
@@ -274,7 +274,13 @@ window.runAgentNow = async function(name) {
   navigate('agents');
 };
 window.approveAgent = async function(name) {
-  await fetch('/api/agents/' + name + '/approve', { method:'POST' });
+  // The header marks this as a deliberate user action (the API refuses without it)
+  var r = await fetch('/api/agents/' + name + '/approve', { method:'POST', headers: {'X-Confirm': 'true'} });
+  var data = await r.json().catch(function() { return {}; });
+  if (!r.ok || !data.ok) {
+    showToast('Approve failed: ' + (data.detail || data.error || ('HTTP ' + r.status)), 'warning');
+    return;
+  }
   showToast(name + ' approved! Running...', 'success');
   await window.runAgentNow(name);
 };

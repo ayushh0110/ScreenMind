@@ -209,3 +209,28 @@ async def test_incognito_blocks_bookmark_capture(client, monkeypatch):
 
         assert (await client.post("/api/incognito/toggle")).json() == {"incognito": False}
         assert (await client.post("/api/capture/bookmark")).json()["status"] == "captured"
+
+
+# ── Python plugin approval ─────────────────────────────────────────────
+
+@pytest.mark.asyncio
+async def test_python_plugin_approval_flow(client, tmp_path, monkeypatch):
+    """New plugins report needs_approval; approving with X-Confirm clears it."""
+    from screenmind.config import settings
+    from screenmind.engine import agent_runner
+    monkeypatch.setattr(agent_runner, "get_agents_dir", lambda: tmp_path)
+    monkeypatch.setattr(agent_runner, "_approved_plugins", set())
+    monkeypatch.setattr(settings, "agents_auto_run_python", False)
+    (tmp_path / "tracker.py").write_text('"""\nname: tracker\n"""\ndef run(context):\n    return "ran"\n', encoding="utf-8")
+
+    agents = (await client.get("/api/agents")).json()["agents"]
+    assert agents[0]["needs_approval"] is True
+
+    run = (await client.post("/api/agents/tracker/run")).json()
+    assert run["status"] == "needs_approval"
+
+    assert (await client.post("/api/agents/tracker/approve")).status_code == 403  # no header
+    assert (await client.post("/api/agents/tracker/approve", headers={"X-Confirm": "true"})).json()["ok"] is True
+
+    agents = (await client.get("/api/agents")).json()["agents"]
+    assert agents[0]["needs_approval"] is False
