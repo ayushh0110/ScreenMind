@@ -56,7 +56,8 @@ def get_agent_log() -> list:
         return list(reversed(_agent_log))
 
 
-def _log_run(name: str, agent_type: str, status: str, output: str = "", error: str = "", duration: float = 0, output_dest: str = "local"):
+def _log_run(name: str, agent_type: str, status: str, output: str = "", error: str = "", duration: float = 0,
+             output_dest: str = "local", slug: Optional[str] = None):
     entry = {
         "timestamp": datetime.utcnow().isoformat() + "Z",
         "name": name,
@@ -82,9 +83,9 @@ def _log_run(name: str, agent_type: str, status: str, output: str = "", error: s
     # Parse comma-separated destinations: "local", "obsidian", "webhook", "webhook:hookname"
     dests = [d.strip().lower() for d in output_dest.split(",")]
 
-    # Local file backup (always runs) — use slug for consistent path
-    slug = name.lower().replace(" ", "-")
-    _save_agent_output(slug, output)
+    # Local file backup (always runs). Saved under the agent's file slug —
+    # the dashboard's Outputs button looks outputs up by filename.
+    _save_agent_output(slug or name.lower().replace(" ", "-"), output)
 
     # Obsidian
     if "obsidian" in dests:
@@ -517,7 +518,8 @@ def run_agent(agent: dict) -> dict:
         duration = time.time() - start
         status = "needs_approval" if "[NEEDS_APPROVAL]" in output else "ok"
         output_dest = agent.get("output", "local")
-        _log_run(name, agent_type, status, output, duration=duration, output_dest=output_dest)
+        _log_run(name, agent_type, status, output, duration=duration,
+                 output_dest=output_dest, slug=agent.get("slug"))
         logger.info(f"{name} ({agent_type}) completed in {duration:.1f}s → {output_dest}")
         return {"status": status, "output": output, "duration": duration}
 

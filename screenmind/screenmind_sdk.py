@@ -21,7 +21,14 @@ from pathlib import Path
 
 logger = logging.getLogger("screenmind.sdk")
 
-API_BASE = "http://127.0.0.1:7777"
+
+def _api_base() -> str:
+    """Local API URL of the running ScreenMind app (follows api_host/api_port)."""
+    from screenmind.config import settings
+    # 0.0.0.0 / :: are listen addresses, not connect addresses
+    host = "127.0.0.1" if settings.api_host in ("0.0.0.0", "::") else settings.api_host
+    return f"http://{host}:{settings.api_port}"
+
 
 # Thread-local storage for current agent context.
 # Set by agent_runner before calling plugin's run().
@@ -41,7 +48,7 @@ def _set_current_agent(name: str):
 def _get(path: str) -> dict:
     """Make a GET request to the local API."""
     try:
-        with urllib.request.urlopen(f"{API_BASE}{path}", timeout=15) as resp:
+        with urllib.request.urlopen(f"{_api_base()}{path}", timeout=15) as resp:
             return json.loads(resp.read())
     except (urllib.error.URLError, urllib.error.HTTPError, OSError) as e:
         logger.error(f"GET {path} failed: {e}")
@@ -56,7 +63,7 @@ def _post(path: str, data: dict = None) -> dict:
     try:
         body = json.dumps(data or {}).encode("utf-8")
         req = urllib.request.Request(
-            f"{API_BASE}{path}", data=body,
+            f"{_api_base()}{path}", data=body,
             headers={"Content-Type": "application/json"}, method="POST"
         )
         with urllib.request.urlopen(req, timeout=15) as resp:
