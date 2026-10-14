@@ -4,9 +4,54 @@
    ═══════════════════════════════════════════════════════════ */
 
 const API = '';
-// Use local date (not UTC) to avoid timezone shift issues
-const _now = new Date();
-let currentDate = `${_now.getFullYear()}-${String(_now.getMonth()+1).padStart(2,'0')}-${String(_now.getDate()).padStart(2,'0')}`;
+
+// ── Local dates ───────────────────────────────────────────
+// Timestamps are stored in local time, so all date math uses the local
+// calendar. Never use toISOString() for dates — it converts to UTC.
+function _fmtLocalDate(d) {
+  return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`;
+}
+function localToday() { return _fmtLocalDate(new Date()); }
+function shiftLocalDate(dateStr, days) {
+  const [y, m, d] = dateStr.split('-').map(Number);
+  const dt = new Date(y, m - 1, d);
+  dt.setDate(dt.getDate() + days);
+  return _fmtLocalDate(dt);
+}
+
+// Activity only exists up to today, so date pickers never go past it.
+// Returns `value`, or today if it is empty or in the future.
+function clampToToday(value, notify = true) {
+  const today = localToday();
+  if (value && value > today) {
+    if (notify) showToast('No activity in the future — showing today', 'info');
+    return today;
+  }
+  return value || today;
+}
+
+// Wire a date <input> and optional ◀ ▶ buttons so the date can't pass today:
+// sets `max`, clamps typed dates, disables ▶ on today. onChange(date) gets
+// the clamped date. Returns sync(), which refreshes `max` (e.g. after midnight).
+function bindDateNav(input, prevBtn, nextBtn, onChange) {
+  const sync = () => {
+    input.max = localToday();
+    if (nextBtn) nextBtn.disabled = input.value >= input.max;
+  };
+  const apply = (value) => {
+    input.value = clampToToday(value);
+    sync();
+    onChange(input.value);
+  };
+  input.value = clampToToday(input.value, false);
+  input.addEventListener('change', () => apply(input.value));
+  if (prevBtn) prevBtn.addEventListener('click', () => apply(shiftLocalDate(input.value || localToday(), -1)));
+  if (nextBtn) nextBtn.addEventListener('click', () => apply(shiftLocalDate(input.value || localToday(), 1)));
+  sync();
+  return sync;
+}
+
+let currentDate = localToday();
 let currentView = 'timeline';
 
 // ── Lock Screen Check ──────────────────────────────────────
@@ -157,6 +202,17 @@ async function api(path, opts) {
   }
   return r.json();
 }
+// POST /reanalyze and surface the server's error detail (e.g. "Audio file not found").
+// Shared by the Timeline/Bookmarks card menus and the Memos view.
+async function _postReanalyze(id) {
+  const r = await fetch(`/api/activities/${id}/reanalyze`, { method: 'POST' });
+  if (!r.ok) {
+    const body = await r.json().catch(() => ({}));
+    throw new Error(body.detail || `HTTP ${r.status}`);
+  }
+  return r.json();
+}
+
 async function apiPost(path) {
   return api(path, { method: 'POST' });
 }
@@ -213,8 +269,11 @@ window.openModal = async function(src, activityId) {
           </div>
         </div>
         ${a.active_url ? `<div style="margin-top:6px"><a href="${a.active_url}" target="_blank" rel="noopener" style="font-size:0.75rem;color:#60a5fa;text-decoration:none;word-break:break-all;display:inline-flex;align-items:center;gap:4px" title="${a.active_url}">🔗 ${a.active_url.length > 80 ? a.active_url.substring(0, 80) + '…' : a.active_url}</a></div>` : ''}`;
-      // Modal shows detailed context (timeline cards already show the short summary)
-      $('#modal-summary').textContent = a.details || a.summary || 'No analysis yet';
+      // Modal shows detailed context (timeline cards already show the short summary).
+      // Voice memos keep the WAV path in `details` and the full transcript in `ocr_text`.
+      $('#modal-summary').textContent = a.is_voice_memo
+        ? (a.ocr_text || a.summary || 'No transcript yet')
+        : (a.details || a.summary || 'No analysis yet');
 
       $('#modal-ocr').textContent = a.scene_description || 'No scene description yet';
     } catch { $('#modal-summary').textContent = 'Unable to load details'; }

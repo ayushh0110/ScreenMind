@@ -55,3 +55,96 @@ def test_data_path_resolution():
     s = Settings(data_dir="~/.screenmind")
     assert s.data_path.is_absolute()
     assert "~" not in str(s.data_path)
+
+
+# ── settings.json migrations ───────────────────────────────────────────
+
+import json
+
+from screenmind.config import SETTINGS_SCHEMA_VERSION, Settings
+
+
+def _settings_with_file(tmp_path, data=None):
+    """A Settings instance whose settings.json (if any) has the given content."""
+    s = Settings(data_dir=str(tmp_path))
+    if data is not None:
+        s.settings_json_path.write_text(json.dumps(data))
+    s.load_runtime_overrides()
+    return s
+
+
+def _file(s):
+    return json.loads(s.settings_json_path.read_text())
+
+
+class TestJwtFilterRestore:
+    def test_old_file_gets_jwt_back(self, tmp_path):
+        s = _settings_with_file(tmp_path, {"sensitive_filter_types": "credit_card,ssn,api_key,password"})
+        assert s.sensitive_filter_types == "credit_card,ssn,api_key,password,jwt"
+        assert _file(s)["sensitive_filter_types"] == "credit_card,ssn,api_key,password,jwt"
+        assert _file(s)["settings_schema_version"] == SETTINGS_SCHEMA_VERSION
+
+    def test_migration_runs_once(self, tmp_path):
+        """After the upgrade, a user who unchecks JWT keeps it unchecked."""
+        s = _settings_with_file(tmp_path, {"sensitive_filter_types": "ssn"})
+        s.save_runtime_overrides({"sensitive_filter_types": "ssn"})  # user unchecks JWT
+
+        reloaded = _settings_with_file(tmp_path)
+        assert reloaded.sensitive_filter_types == "ssn"
+
+    def test_current_version_file_left_alone(self, tmp_path):
+        s = _settings_with_file(tmp_path, {
+            "sensitive_filter_types": "ssn",
+            "settings_schema_version": SETTINGS_SCHEMA_VERSION,
+        })
+        assert s.sensitive_filter_types == "ssn"
+
+    def test_empty_types_left_alone(self, tmp_path):
+        """Empty already means "all default types" — adding jwt would narrow it."""
+        s = _settings_with_file(tmp_path, {"sensitive_filter_types": ""})
+        assert s.sensitive_filter_types == ""
+        assert _file(s)["settings_schema_version"] == SETTINGS_SCHEMA_VERSION
+
+    def test_old_file_without_types_only_stamped(self, tmp_path):
+        s = _settings_with_file(tmp_path, {"capture_interval": 60})
+        assert "sensitive_filter_types" not in _file(s)
+        assert _file(s)["settings_schema_version"] == SETTINGS_SCHEMA_VERSION
+        assert "jwt" in s.sensitive_filter_types  # default
+
+    def test_no_file_is_not_created(self, tmp_path):
+        """Creating settings.json early would skip the first-run welcome screen."""
+        s = _settings_with_file(tmp_path)
+        assert not s.settings_json_path.exists()
+
+    def test_every_save_stamps_version(self, tmp_path):
+        s = _settings_with_file(tmp_path)
+        s.save_runtime_overrides({"capture_interval": 30})
+        assert _file(s)["settings_schema_version"] == SETTINGS_SCHEMA_VERSION
+
+
+class TestSettingsFileSafety:
+    def test_write_is_atomic_no_temp_left(self, tmp_path):
+        s = _settings_with_file(tmp_path, {"capture_interval": 60})
+        s.save_runtime_overrides({"capture_interval": 30})
+        assert _file(s)["capture_interval"] == 30
+        assert not (tmp_path / "settings.json.tmp").exists()
+
+    def test_corrupt_file_is_backed_up_not_lost(self, tmp_path):
+        """A truncated file used to be silently replaced by {} on the next save."""
+        s = Settings(data_dir=str(tmp_path))
+        s.settings_json_path.write_text('{"capture_interval": 60, "webhook_url": "https://ex', encoding="utf-8")
+        s.load_runtime_overrides()          # logs the error, keeps defaults
+        s.save_runtime_overrides({"capture_interval": 30})
+
+        backups = list(tmp_path.glob("settings.json.corrupt-*"))
+        assert len(backups) == 1
+        assert "webhook_url" in backups[0].read_text(encoding="utf-8")
+        assert _file(s)["capture_interval"] == 30
+
+    def test_non_object_json_treated_as_corrupt(self, tmp_path):
+        s = Settings(data_dir=str(tmp_path))
+        s.settings_json_path.write_text("[1, 2, 3]", encoding="utf-8")
+        s.load_runtime_overrides()
+        s.save_runtime_overrides({"capture_interval": 30})
+        assert _file(s)["capture_interval"] == 30
+        assert list(tmp_path.glob("settings.json.corrupt-*"))

@@ -17,7 +17,7 @@ router = APIRouter(prefix="/api/agents", tags=["agents"])
 @router.get("")
 async def list_agents():
     """List all installed agents with metadata."""
-    from screenmind.engine.agent_runner import discover_agents, get_agent_log
+    from screenmind.engine.agent_runner import discover_agents, get_agent_log, _approved_plugins
     agents = discover_agents()
     log = get_agent_log()
     log_by_name = {}
@@ -26,6 +26,12 @@ async def list_agents():
             log_by_name[entry["name"]] = entry
     for a in agents:
         a["last_run"] = log_by_name.get(a["name"])
+        # Python plugins must be approved (per app session) unless auto-run is on
+        a["needs_approval"] = (
+            a["type"] == "python"
+            and not settings.agents_auto_run_python
+            and a.get("filepath") not in _approved_plugins
+        )
     return {"agents": agents, "agents_enabled": settings.agents_enabled}
 
 
@@ -128,7 +134,7 @@ async def run_agent_now(name: str, request: Request):
             if a["type"] == "python" and not settings.agents_auto_run_python:
                 if a.get("filepath", "") not in _approved_plugins:
                     if request.headers.get("X-Confirm") != "true":
-                        return {"status": "error", "error": "Python agent not approved. Approve it first or pass X-Confirm: true header."}
+                        return {"status": "needs_approval", "error": "Python agent not approved. Approve it first or pass X-Confirm: true header."}
             result = await asyncio.get_event_loop().run_in_executor(None, lambda: run_agent(a))
             return result
     return {"status": "error", "error": "Agent not found"}

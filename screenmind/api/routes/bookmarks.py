@@ -3,6 +3,7 @@
 from fastapi import APIRouter, Query
 
 from screenmind.api.dependencies import db
+from screenmind.api.serializers import add_display_fields
 
 router = APIRouter(prefix="/api", tags=["bookmarks"])
 
@@ -18,6 +19,5 @@ async def toggle_bookmark(activity_id: int):
 async def get_bookmarks(limit: int = Query(default=50, ge=1, le=200)):
     bookmarks = db.get_bookmarks(limit=limit)
     for b in bookmarks:
-        if b.get("screenshot_path"):
-            b["screenshot_url"] = f"/api/screenshot/{b['id']}"
+        add_display_fields(b)
     return {"bookmarks": bookmarks}

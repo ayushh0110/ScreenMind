@@ -22,7 +22,7 @@ async function renderMemos(el) {
     ${memoAudioWarning}
     <div class="date-nav" style="margin-bottom:20px">
       <button class="btn btn-ghost btn-sm" id="memo-prev">◀</button>
-      <input type="date" id="memo-date" value="${memosDate}">
+      <input type="date" id="memo-date" value="${memosDate}" max="${localToday()}">
       <button class="btn btn-ghost btn-sm" id="memo-next">▶</button>
       <span style="margin-left:12px;color:var(--text-muted);font-size:0.85rem" id="memo-count"></span>
     </div>
@@ -31,19 +31,8 @@ async function renderMemos(el) {
     </div>
     <div id="memos-list"><div class="spinner"></div></div>`;
 
-  $('#memo-date').addEventListener('change', function(e) { memosDate = e.target.value; loadMemos(memosDate); });
-  $('#memo-prev').addEventListener('click', function() {
-    var d = new Date(memosDate); d.setDate(d.getDate() - 1);
-    memosDate = d.toISOString().split('T')[0];
-    $('#memo-date').value = memosDate;
-    loadMemos(memosDate);
-  });
-  $('#memo-next').addEventListener('click', function() {
-    var d = new Date(memosDate); d.setDate(d.getDate() + 1);
-    memosDate = d.toISOString().split('T')[0];
-    $('#memo-date').value = memosDate;
-    loadMemos(memosDate);
-  });
+  bindDateNav($('#memo-date'), $('#memo-prev'), $('#memo-next'), function(d) { memosDate = d; loadMemos(memosDate); });
+  memosDate = $('#memo-date').value;
   loadMemos(memosDate);
 }
 
@@ -83,8 +72,8 @@ async function loadMemos(date) {
             '<button class="menu-item bookmark-item ' + bookmarkClass + '" onclick="event.stopPropagation(); toggleMemoBookmark(' + m.id + ', this)">' +
               '<span class="menu-icon">' + (m.bookmarked ? '★' : '☆') + '</span> ' + bookmarkLabel +
             '</button>' +
-            '<button class="menu-item reanalyze-item" onclick="event.stopPropagation(); reanalyzeActivity(' + m.id + ', this)">' +
-              '<span class="menu-icon">↻</span> Re-analyze' +
+            '<button class="menu-item reanalyze-item" onclick="event.stopPropagation(); retranscribeMemo(' + m.id + ', this)">' +
+              '<span class="menu-icon">↻</span> Re-transcribe' +
             '</button>' +
             '<div class="menu-divider"></div>' +
             '<button class="menu-item delete-item" onclick="event.stopPropagation(); deleteMemo(' + m.id + ', this)">' +
@@ -134,6 +123,20 @@ window.seekMemo = function(scrub) {
 };
 
 // ── Memo Actions (three-dot menu) ────────────────────────
+window.retranscribeMemo = async function(id, el) {
+  el.closest('.card-menu').classList.remove('open');
+  el.closest('.card-menu-wrap').querySelector('.card-menu-trigger').classList.remove('active');
+  showToast('↻ Re-transcribing voice memo...', 'info');
+  try {
+    await _postReanalyze(id);
+    showToast('✓ Transcript updated!', 'success');
+    var dateEl = document.getElementById('memo-date');
+    if (dateEl) loadMemos(dateEl.value);
+  } catch (err) {
+    showToast('Re-transcription failed: ' + err.message, 'warning');
+  }
+};
+
 window.toggleMemoBookmark = async function(id, el) {
   try {
     var r = await fetch('/api/activities/' + id + '/bookmark', { method: 'PUT' });

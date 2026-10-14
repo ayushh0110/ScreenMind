@@ -164,3 +164,56 @@ class TestAgentLog:
         entry = next((e for e in log if e["name"] == "truncate-test"), None)
         if entry:
             assert len(entry["output"]) <= 500
+
+
+class TestMarkdownAgentData:
+    """The data injected into markdown agent prompts."""
+
+    def _run(self, activities, meetings, data="timeline, meetings"):
+        from unittest.mock import MagicMock, patch
+        from screenmind.engine import agent_runner
+        fake_db = MagicMock()
+        fake_db.get_activities_by_date.return_value = activities
+        fake_db.get_meetings_by_date.return_value = meetings
+        agent = {"name": "t", "prompt": "Do it", "_data_sections": {s.strip() for s in data.split(",")}}
+        with patch("screenmind.storage.database.Database", return_value=fake_db), \
+             patch("screenmind.engine.llm_client.generate", return_value="ok") as gen:
+            agent_runner._run_markdown_agent(agent)
+        return gen.call_args.kwargs["prompt"]
+
+    def test_times_are_hh_mm_with_microsecond_timestamps(self):
+        """Stored timestamps include microseconds; slicing showed "[5.123]"."""
+        prompt = self._run(
+            [{"status": "ok", "timestamp": "2026-10-13T14:30:05.123456", "app_name": "Code",
+              "category": "coding", "summary": "Editing main.py"}],
+            [{"start_time": "2026-10-13T15:00:00.654321", "app_name": "Zoom",
+              "duration_minutes": 30, "summary": "Planning"}],
+        )
+        assert "[14:30] Code (coding): Editing main.py" in prompt
+        assert "- 15:00 Zoom (30min): Planning" in prompt
+
+    def test_meeting_summaries_not_cut_at_80_chars(self):
+        summary = "ACTION ITEMS: " + "; ".join(f"[You] follow up on item {i}" for i in range(12))
+        prompt = self._run([], [{"start_time": "2026-10-13T15:00:00", "app_name": "Zoom",
+                                 "duration_minutes": 30, "summary": summary}], data="meetings")
+        assert "follow up on item 10" in prompt
+
+
+class TestAgentOutputLocation:
+    def test_output_saved_under_file_slug(self, tmp_path, monkeypatch):
+        """Outputs are looked up by filename; a different display name must not hide them."""
+        from screenmind.config import settings
+        from screenmind.engine import agent_runner
+        monkeypatch.setattr(settings, "data_dir", str(tmp_path))
+        monkeypatch.setattr(agent_runner, "_LOG_FILE", tmp_path / "run_log.json")
+        agent_runner._log_run("Focus Report v2", "markdown", "ok", output="report", slug="focus-report")
+        assert list((tmp_path / "agents" / "output" / "focus-report").glob("*.md"))
+
+
+class TestSdkApiBase:
+    def test_follows_configured_port(self, monkeypatch):
+        from screenmind import screenmind_sdk
+        from screenmind.config import settings
+        monkeypatch.setattr(settings, "api_port", 8123)
+        monkeypatch.setattr(settings, "api_host", "0.0.0.0")
+        assert screenmind_sdk._api_base() == "http://127.0.0.1:8123"

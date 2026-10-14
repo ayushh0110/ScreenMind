@@ -10,6 +10,8 @@ import logging
 import os
 import sys
 import threading
+import time
+from datetime import datetime
 from pathlib import Path
 from typing import List, Literal, Optional
 
@@ -89,10 +91,78 @@ _ALLOWED_OVERRIDES = {
     "capture_active_monitor",
     "setup_complete",
     "capture_paused",
+    "settings_schema_version",
 }
+
+# Version of the settings.json layout. Every write stamps this value; files
+# from older versions are migrated once on load (see _migrate_overrides).
+SETTINGS_SCHEMA_VERSION = 1
+
+
+def _migrate_overrides(overrides: dict) -> dict:
+    """Return the updates needed to bring an older settings.json up to date.
+
+    v1: The Settings page had no JWT checkbox, so every save silently dropped
+    "jwt" from sensitive_filter_types. Nobody could have turned it off on
+    purpose, so restore it once. An empty value already means "all default
+    types" (see parse_enabled_types), so it is left alone.
+    """
+    updates = {}
+    version = overrides.get("settings_schema_version", 0)
+    if not isinstance(version, int):
+        version = 0
+
+    if version < 1:
+        types = overrides.get("sensitive_filter_types")
+        if isinstance(types, str) and types.strip():
+            parts = [t.strip() for t in types.split(",") if t.strip()]
+            if "jwt" not in parts:
+                updates["sensitive_filter_types"] = ",".join(parts + ["jwt"])
+
+    if version < SETTINGS_SCHEMA_VERSION:
+        updates["settings_schema_version"] = SETTINGS_SCHEMA_VERSION
+    return updates
 
 # Lock to prevent concurrent read-modify-write races on settings.json
 _settings_lock = threading.Lock()
+
+
+def _read_settings_file(path: Path) -> dict:
+    """Read settings.json for an update. Caller holds _settings_lock.
+
+    A corrupt file is moved aside (settings.json.corrupt-<timestamp>) rather
+    than silently overwritten, so the user's settings can be recovered.
+    """
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+        if isinstance(data, dict):
+            return data
+        reason = f"expected a JSON object, got {type(data).__name__}"
+    except (OSError, ValueError) as e:
+        reason = str(e)
+    backup = path.with_name(f"{path.name}.corrupt-{datetime.now():%Y%m%d-%H%M%S}")
+    try:
+        os.replace(path, backup)
+        logger.error(f"settings.json was unreadable ({reason}); moved to {backup.name}, starting fresh")
+    except OSError as e:
+        logger.error(f"settings.json was unreadable ({reason}) and could not be backed up: {e}")
+    return {}
+
+
+def _write_json_atomic(path: Path, data: dict):
+    """Write JSON via a temp file + rename, so a crash mid-write can't leave
+    a truncated settings.json behind."""
+    tmp = path.with_name(path.name + ".tmp")
+    tmp.write_text(json.dumps(data, indent=2), encoding="utf-8")
+    # On Windows the rename can briefly fail while antivirus/indexers hold the file
+    for attempt in range(5):
+        try:
+            os.replace(tmp, path)
+            return
+        except PermissionError:
+            if attempt == 4:
+                raise
+            time.sleep(0.1)
 
 class Settings(BaseSettings):
     """Application settings loaded from environment / .env file."""
@@ -277,6 +347,7 @@ class Settings(BaseSettings):
 
     # ── Internal State ────────────────────────────────────────────────────
     setup_complete: bool = Field(default=False, description="Whether first-run setup is complete")
+    settings_schema_version: int = Field(default=0, description="settings.json layout version (internal)")
 
     model_config = {
         "env_file": ".env",
@@ -356,7 +427,9 @@ class Settings(BaseSettings):
         if path.exists():
             try:
                 with _settings_lock:
-                    overrides = json.loads(path.read_text())
+                    overrides = json.loads(path.read_text(encoding="utf-8"))
+                if not isinstance(overrides, dict):
+                    raise ValueError(f"expected a JSON object, got {type(overrides).__name__}")
                 for k, v in overrides.items():
                     if k in _ALLOWED_OVERRIDES and hasattr(self, k):
                         try:
@@ -366,17 +439,22 @@ class Settings(BaseSettings):
                 logger.info(f"Loaded runtime overrides: {list(overrides.keys())}")
             except Exception as e:
                 logger.error(f"Failed to load settings.json: {e}")
+                return
+
+            # One-time upgrade of files written by older versions
+            updates = _migrate_overrides(overrides)
+            if updates:
+                try:
+                    self.save_runtime_overrides(updates)
+                    logger.info(f"Migrated settings.json to v{SETTINGS_SCHEMA_VERSION}: {sorted(updates)}")
+                except Exception as e:
+                    logger.error(f"Failed to migrate settings.json: {e}")
 
     def save_runtime_overrides(self, updates: dict):
         """Save dashboard settings to settings.json."""
         with _settings_lock:
             path = self.settings_json_path
-            existing = {}
-            if path.exists():
-                try:
-                    existing = json.loads(path.read_text())
-                except Exception as e:
-                    logger.debug("Could not read existing settings.json: %s", e)
+            existing = _read_settings_file(path) if path.exists() else {}
             for k, v in updates.items():
                 if k in _ALLOWED_OVERRIDES:
                     existing[k] = v
@@ -385,7 +463,11 @@ class Settings(BaseSettings):
                             setattr(self, k, v)
                         except (ValueError, ValidationError) as e:
                             logger.debug("Override not applied in memory: %s=%r, %s", k, v, e)
-            path.write_text(json.dumps(existing, indent=2))
+            # Anything written by this version is already in the current layout,
+            # so a later load never re-runs migrations over the user's choices.
+            existing["settings_schema_version"] = SETTINGS_SCHEMA_VERSION
+            self.settings_schema_version = SETTINGS_SCHEMA_VERSION
+            _write_json_atomic(path, existing)
 
 
 # Singleton instance

@@ -56,7 +56,8 @@ def get_agent_log() -> list:
         return list(reversed(_agent_log))
 
 
-def _log_run(name: str, agent_type: str, status: str, output: str = "", error: str = "", duration: float = 0, output_dest: str = "local"):
+def _log_run(name: str, agent_type: str, status: str, output: str = "", error: str = "", duration: float = 0,
+             output_dest: str = "local", slug: Optional[str] = None):
     entry = {
         "timestamp": datetime.utcnow().isoformat() + "Z",
         "name": name,
@@ -82,9 +83,9 @@ def _log_run(name: str, agent_type: str, status: str, output: str = "", error: s
     # Parse comma-separated destinations: "local", "obsidian", "webhook", "webhook:hookname"
     dests = [d.strip().lower() for d in output_dest.split(",")]
 
-    # Local file backup (always runs) — use slug for consistent path
-    slug = name.lower().replace(" ", "-")
-    _save_agent_output(slug, output)
+    # Local file backup (always runs). Saved under the agent's file slug —
+    # the dashboard's Outputs button looks outputs up by filename.
+    _save_agent_output(slug or name.lower().replace(" ", "-"), output)
 
     # Obsidian
     if "obsidian" in dests:
@@ -266,6 +267,19 @@ def _parse_interval_seconds(schedule: str) -> int:
 
 # ── Execution ────────────────────────────────────────────────────────
 
+# Upper bound per meeting summary injected into an agent prompt
+_MEETING_SUMMARY_MAX_CHARS = 600
+
+
+def _hhmm(timestamp: Optional[str]) -> str:
+    """HH:MM from an ISO timestamp. Stored timestamps may include
+    microseconds, so string slicing can't be used."""
+    try:
+        return datetime.fromisoformat(timestamp).strftime("%H:%M")
+    except (TypeError, ValueError):
+        return "??:??"
+
+
 def _run_markdown_agent(agent: dict) -> str:
     """Execute a markdown agent by calling Gemma with injected screen data.
 
@@ -346,12 +360,16 @@ def _run_markdown_agent(agent: dict) -> str:
         try:
             meetings = db.get_meetings_by_date(str(datetime.now().date()))
             if meetings:
+                shown = meetings[:5]
+                # Share the remaining budget so agents (e.g. meeting-actions)
+                # see enough of each structured summary to find action items
+                per_meeting = max(80, min(_MEETING_SUMMARY_MAX_CHARS, remaining // len(shown) - 40))
                 mtg_lines = []
-                for m in meetings[:5]:
-                    start = m.get("start_time", "?")[-8:-3]  # HH:MM
+                for m in shown:
+                    start = _hhmm(m.get("start_time"))
                     app = m.get("app_name", "?")
                     dur = m.get("duration_minutes", 0)
-                    summ = (m.get("summary") or "No summary")[:80]
+                    summ = " ".join((m.get("summary") or "No summary").split())[:per_meeting]
                     mtg_lines.append(f"- {start} {app} ({dur}min): {summ}")
                 s = "### Meetings Today\n" + "\n".join(mtg_lines)
                 sections.append(s)
@@ -375,7 +393,7 @@ def _run_markdown_agent(agent: dict) -> str:
         max_items = max(remaining // 80, 3)  # ~80 chars per line
         timeline_lines = []
         for a in analyzed[:max_items]:
-            ts = a.get("timestamp", "")[-8:-3]  # HH:MM
+            ts = _hhmm(a.get("timestamp"))
             app = a.get("app_name", "?")
             cat = a.get("category", "?")
             summary = (a.get("summary") or "")[:60]
@@ -500,7 +518,8 @@ def run_agent(agent: dict) -> dict:
         duration = time.time() - start
         status = "needs_approval" if "[NEEDS_APPROVAL]" in output else "ok"
         output_dest = agent.get("output", "local")
-        _log_run(name, agent_type, status, output, duration=duration, output_dest=output_dest)
+        _log_run(name, agent_type, status, output, duration=duration,
+                 output_dest=output_dest, slug=agent.get("slug"))
         logger.info(f"{name} ({agent_type}) completed in {duration:.1f}s → {output_dest}")
         return {"status": status, "output": output, "duration": duration}
 

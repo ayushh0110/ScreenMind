@@ -161,3 +161,76 @@ async def test_models_list(client):
     data = resp.json()
     assert "models" in data
     assert len(data["models"]) >= 1
+
+
+# ── Summary / standup date validation ─────────────────────────────────
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("endpoint", ["/api/summary/generate", "/api/standup/generate"])
+async def test_generate_rejects_future_date(client, endpoint):
+    from datetime import date, timedelta
+    tomorrow = (date.today() + timedelta(days=1)).isoformat()
+    resp = await client.post(f"{endpoint}?date={tomorrow}")
+    assert resp.status_code == 400
+    assert "future" in resp.json()["detail"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("endpoint", ["/api/summary/generate", "/api/standup/generate"])
+async def test_generate_rejects_malformed_date(client, endpoint):
+    resp = await client.post(f"{endpoint}?date=not-a-date")
+    assert resp.status_code == 400
+
+
+@pytest.mark.asyncio
+async def test_generate_accepts_past_date_without_data(client):
+    resp = await client.post("/api/summary/generate?date=2020-01-01")
+    assert resp.status_code == 200
+    assert "No activities" in resp.json()["summary"]["summary"]
+
+
+# ── Incognito ─────────────────────────────────────────────────────────
+
+@pytest.mark.asyncio
+async def test_incognito_blocks_bookmark_capture(client, monkeypatch):
+    import asyncio
+    from unittest.mock import patch
+    import screenmind.api.routes.capture as capture_route
+    from screenmind.workers.capture_worker import CaptureWorker
+
+    with patch("screenmind.config.Settings.save_runtime_overrides"):
+        worker = CaptureWorker(queue=asyncio.Queue())
+        monkeypatch.setattr(capture_route, "capture_worker", worker)
+
+        assert (await client.post("/api/incognito/toggle")).json() == {"incognito": True}
+        assert (await client.get("/api/status")).json()["incognito"] is True
+        resp = (await client.post("/api/capture/bookmark")).json()
+        assert resp["status"] == "error" and "Incognito" in resp["message"]
+
+        assert (await client.post("/api/incognito/toggle")).json() == {"incognito": False}
+        assert (await client.post("/api/capture/bookmark")).json()["status"] == "captured"
+
+
+# ── Python plugin approval ─────────────────────────────────────────────
+
+@pytest.mark.asyncio
+async def test_python_plugin_approval_flow(client, tmp_path, monkeypatch):
+    """New plugins report needs_approval; approving with X-Confirm clears it."""
+    from screenmind.config import settings
+    from screenmind.engine import agent_runner
+    monkeypatch.setattr(agent_runner, "get_agents_dir", lambda: tmp_path)
+    monkeypatch.setattr(agent_runner, "_approved_plugins", set())
+    monkeypatch.setattr(settings, "agents_auto_run_python", False)
+    (tmp_path / "tracker.py").write_text('"""\nname: tracker\n"""\ndef run(context):\n    return "ran"\n', encoding="utf-8")
+
+    agents = (await client.get("/api/agents")).json()["agents"]
+    assert agents[0]["needs_approval"] is True
+
+    run = (await client.post("/api/agents/tracker/run")).json()
+    assert run["status"] == "needs_approval"
+
+    assert (await client.post("/api/agents/tracker/approve")).status_code == 403  # no header
+    assert (await client.post("/api/agents/tracker/approve", headers={"X-Confirm": "true"})).json()["ok"] is True
+
+    agents = (await client.get("/api/agents")).json()["agents"]
+    assert agents[0]["needs_approval"] is False

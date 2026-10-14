@@ -4,13 +4,14 @@ let rewindFrames = [], rewindIdx = 0, rewindInterval = null, rewindSpeed = 1000;
 async function renderRewind(el) {
   el.innerHTML = `
     <div style="display:flex;align-items:center;gap:12px;margin-bottom:16px">
-      <input type="date" id="rewind-date" value="${currentDate}">
+      <input type="date" id="rewind-date" value="${currentDate}" max="${localToday()}">
       <button class="btn btn-primary btn-sm" id="load-rewind">Load Day</button>
     </div>
     <div class="rewind-player card" id="rewind-container">
       <div class="empty-state"><div class="empty-icon">⏪</div><div class="empty-title">Day Rewind</div><div>Select a date and click Load to replay your day as a timelapse.</div></div>
     </div>`;
-  $('#load-rewind').addEventListener('click', () => { currentDate = $('#rewind-date').value; loadRewind(); });
+  bindDateNav($('#rewind-date'), null, null, () => {});
+  $('#load-rewind').addEventListener('click', () => { currentDate = clampToToday($('#rewind-date').value); loadRewind(); });
 }
 
 async function loadRewind() {

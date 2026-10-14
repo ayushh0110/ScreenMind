@@ -1,35 +1,37 @@
 """
 macOS Platform Adapter
-Uses AppKit/NSWorkspace for window detection.
+Uses Quartz (CGWindowListCopyWindowInfo) for window detection.
 Accessibility via AXUIElement (requires accessibility permission).
 """
 
 import logging
-import subprocess
+import time
 from typing import Optional, Tuple
 
 from screenmind.platform_support.base import PlatformAdapter
 
 logger = logging.getLogger("screenmind.platform_support.macos")
 
+# One capture cycle asks for the app name, title, PID and bounds separately.
+# Caching the Quartz snapshot briefly makes them all describe the same window.
+_FRONT_WINDOW_TTL = 1.0
+
+# Windows smaller than this (in points) are overlay helpers such as window
+# managers (Rectangle) or menu-bar popovers, not the window the user works in.
+_MIN_WINDOW_SIZE = 50
+
 
 class MacOSAdapter(PlatformAdapter):
-    """macOS implementation using AppKit (pyobjc) and AXUIElement."""
+    """macOS implementation using Quartz (pyobjc) and AXUIElement."""
 
     def __init__(self):
-        self._appkit_available = False
         self._ax_available = False
+        self._front_cache: Optional[dict] = None
+        self._front_cache_ts = float("-inf")
         self._init_frameworks()
 
     def _init_frameworks(self):
         """Try to import macOS frameworks."""
-        try:
-            from AppKit import NSWorkspace  # type: ignore
-            self._appkit_available = True
-            logger.debug("macOS AppKit initialized")
-        except ImportError:
-            logger.warning("macOS AppKit not available (install pyobjc: pip install pyobjc-framework-Cocoa)")
-
         try:
             from ApplicationServices import (  # type: ignore
                 AXUIElementCreateSystemWide,
@@ -44,65 +46,80 @@ class MacOSAdapter(PlatformAdapter):
     def platform_name(self) -> str:
         return "macOS"
 
-    def get_foreground_window_handle(self) -> Optional[int]:
-        """macOS doesn't use integer window handles like Win32. Returns PID instead."""
+    def _front_window(self) -> Optional[dict]:
+        """Frontmost window, cached for _FRONT_WINDOW_TTL seconds."""
+        now = time.monotonic()
+        if now - self._front_cache_ts >= _FRONT_WINDOW_TTL:
+            self._front_cache = self._query_front_window()
+            self._front_cache_ts = now
+        return self._front_cache
+
+    def _query_front_window(self) -> Optional[dict]:
+        """Return the frontmost normal window from Quartz (owner, pid, title, bounds).
+
+        NSWorkspace.frontmostApplication() goes stale in a process without an
+        NSRunLoop, so we read the live on-screen window list instead. It is
+        ordered front to back; layer 0 is the normal app window layer.
+        kCGWindowName needs Screen Recording permission, else it is empty.
+        """
         try:
-            if self._appkit_available:
-                from AppKit import NSWorkspace  # type: ignore
-                active = NSWorkspace.sharedWorkspace().frontmostApplication()
-                return active.processIdentifier() if active else None
-        except Exception:
-            pass
+            import Quartz  # type: ignore
+            windows = Quartz.CGWindowListCopyWindowInfo(
+                Quartz.kCGWindowListOptionOnScreenOnly | Quartz.kCGWindowListExcludeDesktopElements,
+                Quartz.kCGNullWindowID,
+            ) or []
+            for w in windows:
+                if w.get("kCGWindowLayer", 1) != 0:
+                    continue
+                bounds = w.get("kCGWindowBounds") or {}
+                if (bounds.get("Width", 0) < _MIN_WINDOW_SIZE
+                        or bounds.get("Height", 0) < _MIN_WINDOW_SIZE):
+                    continue
+                return {
+                    "owner": w.get("kCGWindowOwnerName"),
+                    "pid": w.get("kCGWindowOwnerPID"),
+                    "title": w.get("kCGWindowName") or None,
+                    "bounds": (
+                        int(bounds.get("X", 0)), int(bounds.get("Y", 0)),
+                        int(bounds["Width"]), int(bounds["Height"]),
+                    ),
+                }
+        except Exception as e:
+            logger.debug(f"Quartz window lookup failed: {e}")
         return None
 
+    def get_foreground_window_handle(self) -> Optional[int]:
+        """macOS doesn't use integer window handles like Win32. Returns PID instead."""
+        front = self._front_window()
+        return front["pid"] if front else None
+
     def get_active_window_title(self) -> Optional[str]:
-        """Get active window title using AppKit or osascript fallback."""
-        # Method 1: AppKit
-        if self._appkit_available:
-            try:
-                from AppKit import NSWorkspace  # type: ignore
-                active = NSWorkspace.sharedWorkspace().frontmostApplication()
-                if active:
-                    return active.localizedName()
-            except Exception:
-                pass
-
-        # Method 2: osascript fallback
-        try:
-            result = subprocess.run(
-                ["osascript", "-e",
-                 'tell application "System Events" to get name of first application process whose frontmost is true'],
-                capture_output=True, text=True, timeout=3
-            )
-            if result.returncode == 0 and result.stdout.strip():
-                return result.stdout.strip()
-        except Exception:
-            pass
-
+        """Get the frontmost window's title, falling back to the app name."""
+        front = self._front_window()
+        if front:
+            return front["title"] or front["owner"]
         return None
 
     def get_active_app_name(self) -> Optional[str]:
-        """Get active app name. On macOS, same as window title source."""
-        if self._appkit_available:
-            try:
-                from AppKit import NSWorkspace  # type: ignore
-                active = NSWorkspace.sharedWorkspace().frontmostApplication()
-                if active:
-                    return active.localizedName()
-            except Exception:
-                pass
+        """Get the app that owns the frontmost window."""
+        front = self._front_window()
+        return front["owner"] if front else None
 
-        # Fallback
-        title = self.get_active_window_title()
-        if title:
-            parts = title.rsplit(" - ", 1)
-            return parts[-1] if parts else title
-        return None
+    def get_active_window_bounds(self) -> Optional[Tuple[int, int, int, int]]:
+        """Frontmost window as (x, y, width, height) in global screen points."""
+        front = self._front_window()
+        return front["bounds"] if front else None
 
     # ── Accessibility ────────────────────────────────────────────────
 
     def is_a11y_available(self) -> bool:
         return self._ax_available
+
+    @property
+    def trusts_os_app_name(self) -> bool:
+        """The window owner name ("Terminal", "Google Chrome") is user-facing, while
+        titles rarely end with the app name (Terminal: "dir — cmd — 120×30")."""
+        return True
 
     def extract_a11y_text(self, hwnd: Optional[int] = None) -> Tuple[Optional[str], str]:
         """

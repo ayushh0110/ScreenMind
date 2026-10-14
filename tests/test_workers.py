@@ -174,3 +174,136 @@ class TestURLExtraction:
         from screenmind.workers.analysis_worker import _extract_all_urls
         urls = _extract_all_urls("See https://example.com/page.")
         assert urls[0] == "https://example.com/page"
+
+
+class TestAnalysisWorkerBackfill:
+    """Backfill re-analyzes rows that were never analyzed."""
+
+    async def test_backfill_passes_detected_app_as_hint(self, db, tmp_path):
+        """Unanalyzed rows have app_name NULL; the OS-detected app must be used."""
+        from PIL import Image
+        from screenmind.storage.models import ScreenshotEntry
+        from screenmind.workers.analysis_worker import AnalysisWorker
+
+        shot = tmp_path / "shot.jpg"
+        Image.new("RGB", (64, 64), "white").save(shot)
+        db.insert_activity(ScreenshotEntry(
+            timestamp=datetime.now(),
+            screenshot_path=str(shot),
+            window_title="Chats",
+            detected_app_name="Telegram",
+            bookmarked=False,
+            analyzed=False,
+        ))
+
+        worker = AnalysisWorker(queue=asyncio.Queue(maxsize=100), database=db)
+        worker._process = AsyncMock()
+        await worker._backfill_skipped()
+
+        worker._process.assert_awaited_once()
+        capture = worker._process.await_args.args[0]
+        assert capture.app_name == "Telegram"
+        assert capture.window_title == "Chats"
+
+    async def test_backfill_ignores_unknown_app_name(self, db, tmp_path):
+        """A skipped row with no OS detection stores app_name="unknown".
+
+        That placeholder must not reach the analyzer as an OS hint, or
+        _normalize() would record "unknown" as the app name.
+        """
+        from PIL import Image
+        from screenmind.storage.models import ActivityRecord, ScreenshotEntry
+        from screenmind.workers.analysis_worker import AnalysisWorker
+
+        shot = tmp_path / "shot.jpg"
+        Image.new("RGB", (64, 64), "white").save(shot)
+        activity_id = db.insert_activity(ScreenshotEntry(
+            timestamp=datetime.now(),
+            screenshot_path=str(shot),
+            window_title="Untitled",
+            detected_app_name=None,
+            bookmarked=False,
+            analyzed=False,
+        ))
+        db.update_activity_analysis(
+            activity_id=activity_id,
+            analysis=ActivityRecord(app_name="unknown", activity_summary="Skipped (analysis backlog)"),
+            analysis_method="skipped",
+            status="skipped",
+        )
+
+        worker = AnalysisWorker(queue=asyncio.Queue(maxsize=100), database=db)
+        worker._process = AsyncMock()
+        await worker._backfill_skipped()
+
+        capture = worker._process.await_args.args[0]
+        assert capture.app_name is None
+
+
+class TestCaptureWorkerIncognito:
+    """Incognito promises that nothing is recorded."""
+
+    @pytest.fixture
+    def worker(self):
+        # pause()/resume() persist to settings.json — keep tests off the real file
+        with patch("screenmind.config.Settings.save_runtime_overrides"):
+            w = CaptureWorker(queue=asyncio.Queue(maxsize=100))
+            w._audio_worker = MagicMock()
+            yield w
+
+    def test_incognito_pauses_and_suspends_meetings(self, worker):
+        worker.resume(source="test")
+        worker.set_incognito(True)
+        assert worker.incognito is True
+        assert worker.is_paused is True
+        worker._audio_worker.set_suspended.assert_called_with(True)
+
+    def test_bookmark_refused_while_incognito(self, worker):
+        """Hotkey, dashboard, MCP and agents all go through trigger_bookmark()."""
+        worker.set_incognito(True)
+        assert worker.trigger_bookmark() is False
+        assert worker._pending_bookmark is False
+
+    def test_turning_incognito_on_drops_queued_bookmark(self, worker):
+        assert worker.trigger_bookmark() is True
+        worker.set_incognito(True)
+        assert worker._pending_bookmark is False
+
+    def test_incognito_off_resumes(self, worker):
+        worker.set_incognito(True)
+        worker.set_incognito(False)
+        assert worker.incognito is False
+        assert worker.is_paused is False
+        worker._audio_worker.set_suspended.assert_called_with(False)
+
+    def test_resume_ends_incognito(self, worker):
+        """Start Capturing / pause hotkey while incognito turns incognito off."""
+        worker.set_incognito(True)
+        worker.resume(source="dashboard")
+        assert worker.incognito is False
+        worker._audio_worker.set_suspended.assert_called_with(False)
+
+    async def test_meeting_detection_skipped_while_incognito(self, worker):
+        worker.set_incognito(True)
+        worker._running = True
+
+        async def stop_after_one_tick(_):
+            worker._running = False
+
+        with patch("screenmind.workers.capture_worker.get_active_app_name", return_value="Zoom"), \
+             patch("screenmind.workers.capture_worker.asyncio.sleep", side_effect=stop_after_one_tick):
+            await worker.run()
+        worker._audio_worker.check_meeting.assert_not_called()
+
+    async def test_title_only_fetched_for_browsers(self, worker):
+        worker._running = True
+
+        async def stop_after_one_tick(_):
+            worker._running = False
+
+        with patch("screenmind.workers.capture_worker.get_active_app_name", return_value="Zoom"), \
+             patch("screenmind.workers.capture_worker.get_active_window_title") as title, \
+             patch("screenmind.workers.capture_worker.asyncio.sleep", side_effect=stop_after_one_tick):
+            await worker.run()
+        title.assert_not_called()
+        worker._audio_worker.check_meeting.assert_called_once_with("Zoom", None)

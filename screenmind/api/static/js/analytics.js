@@ -22,13 +22,27 @@ async function renderAnalytics(el) {
   loadAnalytics('day');
 }
 
+// Day = today, Week = last 7 days, Month = last 30 days (inclusive, local dates)
+function _analyticsRangeDates(range) {
+  const to = localToday();
+  const days = { day: 0, week: 6, month: 29 }[range] || 0;
+  return { from: shiftLocalDate(to, -days), to };
+}
+
+// Increments per request so a slow response for an old range can't
+// overwrite the range the user clicked last
+let _analyticsRequestId = 0;
+
 async function loadAnalytics(range) {
+  const requestId = ++_analyticsRequestId;
   try {
-    const data = await api(`/api/stats?range=${range}`);
+    const { from, to } = _analyticsRangeDates(range);
+    const data = await api(`/api/stats?date_from=${from}&date_to=${to}`);
+    if (requestId !== _analyticsRequestId) return;  // a newer range was selected
     const cats = data.category_breakdown || {};
     const apps = data.top_apps || {};
     const total = data.total_activities || 0;
-    const hours = (total * 30 / 3600).toFixed(1);
+    const hours = (data.tracked_hours || 0).toFixed(1);
     const topCat = Object.keys(cats).sort((a, b) => cats[b] - cats[a])[0] || '—';
     const meetingsCount = data.meetings_count || 0;
     const meetingsMins = data.meetings_minutes || 0;

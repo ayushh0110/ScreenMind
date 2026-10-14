@@ -46,7 +46,7 @@ async def auth_status(request: Request):
     setup_complete = False
     try:
         if settings.settings_json_path.exists():
-            data = json.loads(settings.settings_json_path.read_text())
+            data = json.loads(settings.settings_json_path.read_text(encoding="utf-8"))
             setup_complete = data.get("setup_complete", bool(data))
     except Exception:
         pass

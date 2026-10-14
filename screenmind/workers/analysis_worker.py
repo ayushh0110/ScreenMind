@@ -45,6 +45,9 @@ _URL_RE = re.compile(
     r'(?:www\.)[^\s<>"\']+'    # www. prefixed URLs
     , re.IGNORECASE
 )
+# Only live captures drive notifications about what the user is doing now
+FOCUS_CHECK_MAX_AGE_SECONDS = 180
+
 # Common noise URLs that aren't the "active page"
 _URL_NOISE = {'http://localhost', 'http://127.0.0.1', 'https://fonts.googleapis.com',
               'https://cdn.', 'http://schemas.', 'chrome-extension://'}
@@ -289,6 +292,7 @@ class AnalysisWorker:
                     active_url=active_url,
                 )
                 self._cache_hits += 1
+                self._check_focus(capture, cached["analysis"].activity_category)
                 elapsed = time.time() - start
                 self._processed += 1
                 logger.info(f"#{self._processed} in {elapsed:.1f}s: "
@@ -569,6 +573,9 @@ class AnalysisWorker:
             if dev_ctx:
                 self._db.insert_dev_context(activity_id, dev_ctx)
 
+            # 8b. Focus-streak notification (needs the analyzed category)
+            self._check_focus(capture, analysis.activity_category)
+
             # 9. Auto-bookmark important moments
             if settings.auto_bookmark and not capture.bookmarked:
                 keywords = [k.strip().lower() for k in settings.auto_bookmark_keywords.split(",") if k.strip()]
@@ -640,6 +647,18 @@ class AnalysisWorker:
                 status="failed",
             )
 
+    def _check_focus(self, capture: CaptureResult, category: str):
+        """Run the focus-streak notification for a freshly analyzed capture."""
+        if self._is_backfill:
+            return
+        if (datetime.now() - capture.timestamp).total_seconds() > FOCUS_CHECK_MAX_AGE_SECONDS:
+            return
+        try:
+            from screenmind.integrations.smart_notify import check_focus
+            check_focus(capture.app_name or "", category)
+        except Exception as e:
+            logger.debug(f"Focus check failed: {e}")
+
     async def _backfill_skipped(self):
         """Re-analyze one unanalyzed or skipped entry when idle.
         Catches: entries from crashes (analyzed=0) + stale skips.
@@ -647,7 +666,7 @@ class AnalysisWorker:
         try:
             conn = self._db._get_conn()
             row = conn.execute(
-                """SELECT id, screenshot_path, window_title, app_name, ocr_text, ocr_boxes
+                """SELECT id, screenshot_path, window_title, detected_app, ocr_text, ocr_boxes
                    FROM activities
                    WHERE status IN ('pending', 'skipped', 'failed')
                      AND DATE(timestamp) = DATE('now', 'localtime')

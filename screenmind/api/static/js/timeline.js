@@ -4,33 +4,38 @@ async function renderTimeline(el) {
   el.innerHTML = `
     <div class="date-nav" style="margin-bottom:20px">
       <button class="btn btn-ghost btn-sm" id="prev-day">\u25c0</button>
-      <input type="date" id="timeline-date" value="${currentDate}">
+      <input type="date" id="timeline-date" value="${currentDate}" max="${localToday()}">
       <button class="btn btn-ghost btn-sm" id="next-day">\u25b6</button>
       <span style="margin-left:12px;color:var(--text-muted);font-size:0.85rem" id="tl-count"></span>
       <button class="btn btn-ghost btn-sm" id="clear-timeline" style="margin-left:auto;color:#ef4444;font-size:0.8rem" title="Clear today's timeline">🗑 Clear Timeline</button>
     </div>
     <div class="timeline" id="timeline-list"><div class="spinner"></div></div>`;
-  $('#timeline-date').addEventListener('change', e => { currentDate = e.target.value; loadTimeline(); });
-  $('#prev-day').addEventListener('click', () => shiftDate(-1));
-  $('#next-day').addEventListener('click', () => shiftDate(1));
+  const dateInput = $('#timeline-date');
+  const syncDateNav = bindDateNav(dateInput, $('#prev-day'), $('#next-day'), d => { currentDate = d; loadTimeline(); });
+  currentDate = dateInput.value;
   $('#clear-timeline').addEventListener('click', confirmClearTimeline);
   loadTimeline();
   // Inject Model Hub pill into header-actions (guard against duplicates)
   _injectTimelinePill();
-  // Auto-refresh timeline every 30s
+  // Auto-refresh timeline every 30s. After midnight, follow "today" forward
+  // if the user was viewing the previous today.
+  let shownToday = localToday();
   if (window._tlRefresh) clearInterval(window._tlRefresh);
-  window._tlRefresh = setInterval(() => { if (currentView === 'timeline') loadTimeline(true); }, 30000);
-}
-
-function shiftDate(days) {
-  const d = new Date(currentDate); d.setDate(d.getDate() + days);
-  currentDate = d.toISOString().split('T')[0];
-  $('#timeline-date').value = currentDate;
-  loadTimeline();
+  window._tlRefresh = setInterval(() => {
+    if (currentView !== 'timeline') return;
+    const today = localToday();
+    if (today !== shownToday) {
+      if (currentDate === shownToday) { currentDate = today; dateInput.value = today; }
+      shownToday = today;
+      syncDateNav();
+    }
+    loadTimeline(true);
+  }, 30000);
 }
 
 async function loadTimeline(silent = false) {
   const list = $('#timeline-list');
+  if (!list) return;  // timeline not on screen (card actions are shared with Bookmarks)
   if (!silent) list.innerHTML = '<div class="spinner"></div>';
   try {
     const data = await api(`/api/timeline?date=${currentDate}`);
@@ -146,8 +151,8 @@ function timelineCard(a, i) {
           <button class="menu-item bookmark-item ${bookmarkClass}" onclick="event.stopPropagation(); toggleBookmark(${a.id}, this)">
             <span class="menu-icon">${a.bookmarked ? '★' : '☆'}</span> ${bookmarkLabel}
           </button>
-          <button class="menu-item reanalyze-item" onclick="event.stopPropagation(); reanalyzeActivity(${a.id}, this)">
-            <span class="menu-icon">↻</span> Re-analyze
+          <button class="menu-item reanalyze-item" onclick="event.stopPropagation(); reanalyzeActivity(${a.id}, this, ${!!a.is_voice_memo})">
+            <span class="menu-icon">↻</span> ${a.is_voice_memo ? 'Re-transcribe' : 'Re-analyze'}
           </button>
           <div class="menu-divider"></div>
           <button class="menu-item delete-item" onclick="event.stopPropagation(); deleteActivity(${a.id}, this)">
@@ -184,23 +189,30 @@ window.toggleBookmark = async function(id, el) {
     el.closest('.card-menu').classList.remove('open');
     el.closest('.card-menu-wrap').querySelector('.card-menu-trigger').classList.remove('active');
     showToast(data.bookmarked ? '⭐ Bookmarked!' : 'Bookmark removed', data.bookmarked ? 'success' : 'info');
-    loadTimeline(true);
+    _refreshActivityList();
   } catch {}
 };
 
-window.reanalyzeActivity = async function(id, el) {
+// Re-analyze a screenshot, or re-transcribe a voice memo (the server decides)
+window.reanalyzeActivity = async function(id, el, isVoiceMemo = false) {
   el.closest('.card-menu').classList.remove('open');
   el.closest('.card-menu-wrap').querySelector('.card-menu-trigger').classList.remove('active');
-  showToast('↻ Re-analyzing screenshot...', 'info');
+  const verb = isVoiceMemo ? 'Re-transcription' : 'Re-analysis';
+  showToast(isVoiceMemo ? '↻ Re-transcribing voice memo...' : '↻ Re-analyzing...', 'info');
   try {
-    const r = await fetch(`/api/activities/${id}/reanalyze`, { method: 'POST' });
-    if (!r.ok) throw new Error('Failed');
-    showToast('✓ Re-analysis complete!', 'success');
-    loadTimeline(true);
+    await _postReanalyze(id);
+    showToast(`✓ ${verb} complete!`, 'success');
+    _refreshActivityList();
   } catch (err) {
-    showToast('Re-analysis failed: ' + err.message, 'warning');
+    showToast(`${verb} failed: ` + err.message, 'warning');
   }
 };
+
+// Card actions are shared by Timeline and Bookmarks — reload whichever is shown
+function _refreshActivityList() {
+  if (currentView === 'bookmarks') loadBookmarks();
+  else loadTimeline(true);
+}
 
 window.deleteActivity = async function(id, btn) {
   if (!btn.classList.contains('confirm-delete')) {
@@ -221,9 +233,13 @@ window.deleteActivity = async function(id, btn) {
     if (!r.ok) throw new Error('Failed');
     setTimeout(function() { card.remove(); }, 300);
     showToast('Activity deleted', 'success');
-    const count = document.querySelectorAll('.timeline-item').length - 1;
-    const countEl = $('#tl-count');
-    if (countEl) countEl.textContent = `${count} activities`;
+    if (currentView === 'bookmarks') {
+      setTimeout(loadBookmarks, 300);  // after the slide-out animation
+    } else {
+      const count = document.querySelectorAll('.timeline-item').length - 1;
+      const countEl = $('#tl-count');
+      if (countEl) countEl.textContent = `${count} activities`;
+    }
   } catch (err) {
     card.style.transform = ''; card.style.opacity = '';
     showToast('Delete failed', 'warning');

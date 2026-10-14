@@ -59,8 +59,8 @@
 - **🔍 Hybrid Search** — Semantic embeddings (MiniLM) + FTS5 keyword search. Find anything by *meaning*, not just keywords.
 - **💬 Chat with Memory** — Conversational RAG with follow-up support. Ask "what did Alex say on Discord?" → get the actual message.
 - **🧠 Model Hub** — In-app model download with **variant selection** (Q4_0, Q8_0, BF16, etc.). Supports Gemma 4 E2B, E4B, and 12B. Chat and Summary are locked with witty brain animations until the model is ready — then auto-unlock. No terminal needed.
-- **🎙️ Voice Memos** — Hold `Ctrl+Shift+V` → Gemma 4's native audio encoder transcribes. Screenshot captured alongside. Audio always saved, even if transcription fails.
-- **🎤 Meeting Transcription** — Auto-detects Zoom/Teams/Meet, records audio, transcribes, generates structured summaries.
+- **🎙️ Voice Memos** — Hold `Ctrl+Shift+V` → Gemma 4's native audio encoder transcribes. Screenshot captured alongside, full transcript searchable. Audio always saved, even if transcription fails — re-transcribe any time.
+- **🎤 Meeting Transcription** — Auto-detects Zoom, Teams, Webex, Slack and Discord apps, plus Google Meet, Teams, Zoom and Webex in a browser tab. Records only after voice is detected, transcribes, and generates structured summaries. Off by default (Settings → Audio).
 - **📊 Analytics Dashboard** — Category breakdown, top apps, hourly heatmap, meeting stats, focus metrics.
 - **⏪ Day Rewind** — Timelapse playback of your entire day with play/pause/scrub/speed controls.
 - **🚀 Desktop Launcher** — Splash screen with auto-open dashboard. Desktop shortcut auto-created on first run.
@@ -76,11 +76,12 @@
 
 ### 🔒 Privacy & Security
 
-- **100% Local** — All data stays on your machine. Zero network calls after initial model download. No telemetry. Ever.
+- **100% Local** — All data stays on your machine. No telemetry. Ever. The network is only used to download llama-server and models, and for integrations you turn on.
 - **Sensitive Data Filter** — Auto-redacts credit cards, SSNs, API keys, passwords before storage.
-- **Encryption at Rest** — AES encryption for screenshots (Fernet + OS keyring).
-- **Dashboard PIN Lock** — Session-based auth with configurable auto-lock timeout.
-- **Incognito Mode** — One-click pause. Nothing recorded.
+- **Encryption at Rest** — AES encryption for screenshots (Fernet, key in the OS keyring).
+- **Dashboard PIN Lock** — Salted PBKDF2 PIN, session-based auth with configurable auto-lock timeout.
+- **Incognito Mode** — One click: no captures, no bookmarks, no meeting recording.
+- **Data Retention** — Screenshots, recordings and history older than N days (default 7) are deleted automatically.
 
 <details>
 <summary><b>🔌 Integrations & Extensibility</b></summary>
@@ -107,7 +108,7 @@
 | `Ctrl+Shift+P` | ⏸ Toggle pause/resume |
 | `Ctrl+Shift+V` | 🎤 Hold to record voice memo |
 
-> All hotkeys customizable from Settings.
+> All hotkeys customizable from Settings. On macOS, global hotkeys aren't supported yet — use the dashboard. On Linux they need root or membership in the `input` group.
 
 ---
 
@@ -117,7 +118,7 @@
 |---|---|---|---|
 | **License** | ✅ MIT (fully open-source) | Source-available (commercial license required for business use) | Proprietary |
 | **Cost** | ✅ Free forever | Free (personal) / Paid (commercial) | Requires $1000+ Copilot+ PC |
-| **Privacy** | ✅ Zero network calls. Zero telemetry. Ever. | Local-first, optional cloud | Telemetry opt-in. Data stayed local after backlash. |
+| **Privacy** | ✅ 100% local processing. Zero telemetry. Ever. | Local-first, optional cloud | Telemetry opt-in. Data stayed local after backlash. |
 | **Min. hardware** | ✅ Any GPU ≥4GB VRAM (or CPU-only) | 8GB RAM, modern CPU | 40 TOPS NPU + 16GB RAM + BitLocker + Windows Hello |
 | **AI architecture** | ✅ Single model family — Gemma 4 (E2B / E4B / 12B) does vision + audio + reasoning | Multiple models — OCR + Whisper + external LLM | Proprietary NPU model |
 | **Audio/meetings** | ✅ Native — Gemma 4 audio encoder (no Whisper needed) | Whisper-based transcription | ❌ Not supported |
@@ -199,11 +200,11 @@ E2B is the recommended default — it checks all the boxes:
 | Must understand **screenshots natively** | Rules out text-only models |
 | Must stay **100% local** for privacy | Rules out cloud APIs |
 | Must handle **audio natively** | Rules out models without audio encoder |
-| Must be **fast enough** for 30s cycle | E2B: 12-76s on GTX 1650, ~1-4s on RTX 3060+ |
+| Must be **fast enough** for the 40s capture cycle | E2B: 12-76s on GTX 1650, ~1-4s on RTX 3060+ |
 
 If you have more VRAM, E4B offers richer analysis. The 12B model gives the best text reasoning for complex prompts.
 
-> Models are sourced from [ggml-org](https://huggingface.co/ggml-org) (official llama.cpp-compatible GGUFs) and stored in `~/.screenmind/models/`.
+> E2B and E4B come from [ggml-org](https://huggingface.co/ggml-org) (official llama.cpp-compatible GGUFs), 12B from [bartowski](https://huggingface.co/bartowski). Models are stored in `~/.screenmind/models/`.
 
 ---
 
@@ -288,7 +289,7 @@ Or configure everything from the **Settings** tab in the dashboard.
 
 ## 🏗️ Architecture
 
-> For a full deep-dive into threading, caching, search internals, and the privacy pipeline, see [**ARCHITECTURE.md**](ARCHITECTURE.md).
+> For a full deep-dive into threading, caching, search internals, and the privacy pipeline, see [**architecture.md**](architecture.md).
 
 ```
 ┌─────────────────────────────────────────────────────────────────────┐
@@ -393,27 +394,32 @@ Analyze my screen activity and generate a focus report:
 - Give me a focus score out of 10.
 ```
 
-Drop this file in `~/.screenmind/agents/` — it runs automatically.
+Drop this file in `~/.screenmind/agents/` and turn on **Settings → Automation → Agent System** — it then runs on its schedule.
 
 ### Python Plugin SDK
 
 ```python
-from screenmind.screenmind_sdk import ScreenMindSDK
+"""
+name: URL Tracker
+schedule: every 1h
+"""
+from screenmind.screenmind_sdk import get_activities, get_urls_visited, load_state, save_state, ask_gemma
 
-sdk = ScreenMindSDK("my-tracker")
+def run(context):
+    # Today's activities filtered by app
+    activities = get_activities(app="Chrome", limit=20)
 
-# Get today's activities filtered by app
-activities = sdk.get_activities(app="Chrome", limit=20)
+    # Persistent state across runs
+    last_count = load_state("url_count", 0)
+    urls = get_urls_visited()
+    save_state("url_count", len(urls))
 
-# Persistent state across runs
-last_count = sdk.load_state("url_count", 0)
-urls = sdk.get_urls_visited()
-sdk.save_state("url_count", len(urls))
-
-# Ask Gemma (GPU-safe — waits for idle)
-insight = sdk.ask_gemma(f"Summarize these URLs: {urls}")
-print(insight)
+    # Ask Gemma (GPU-safe — waits for the model to be idle)
+    insight = ask_gemma(f"Summarize these URLs: {[u['url'] for u in urls[:10]]}")
+    return f"{len(urls) - last_count} new URLs.\n\n{insight}"
 ```
+
+Python plugins must be approved once per session (**✅ Approve & Run**) unless auto-run is enabled. See the full guide: [**Build Your Own Agent**](docs/BUILD_YOUR_OWN_AGENT.md).
 
 ### Data Selectors (Frontmatter)
 
@@ -427,13 +433,13 @@ Markdown agents declare what data they need:
 | `meetings` | Meeting summaries and durations |
 | `mood` | Mood/sentiment from screen analysis |
 
-Data injection auto-scales to your model's context window.
+Agents receive today's data, sized to your Context Window setting.
 
 ### 4 Agents Ship Built-In
 
 - **daily-journal.md** — First-person journal entry from your day
 - **focus-report.md** — Focus score, deep work hours, distractions
-- **meeting-actions.md** — Extract action items from meeting transcripts
+- **meeting-actions.md** — Action items and decisions from today's recorded meetings (off by default)
 - **code-changelog.md** — Summarize coding activity (commits, files, repos)
 
 ---
@@ -446,17 +452,19 @@ ScreenMind exposes your screen history to any MCP-compatible AI tool:
 python -m screenmind.mcp_server  # stdio transport
 ```
 
-**Claude Desktop config** (`~/.claude/claude_desktop_config.json`):
+Install the MCP extra (`pip install "screenmind[mcp]"`), then add ScreenMind to your client. **Claude Desktop** (`%APPDATA%\Claude\claude_desktop_config.json` on Windows, `~/Library/Application Support/Claude/claude_desktop_config.json` on macOS):
 ```json
 {
   "mcpServers": {
     "screenmind": {
       "command": "python",
-      "args": ["C:/path/to/screenmind/mcp_server.py"]
+      "args": ["-m", "screenmind.mcp_server"]
     }
   }
 }
 ```
+
+Claude Code, Cursor and VS Code setup: see [**MCP_SETUP.md**](MCP_SETUP.md).
 
 ### Tools Available
 
@@ -469,7 +477,7 @@ python -m screenmind.mcp_server  # stdio transport
 | `capture_now` | Trigger instant screenshot |
 | `get_stats` | Usage statistics |
 | `search_audio` | Search meeting transcripts |
-| `get_screenshot` | Retrieve screenshot path by activity ID |
+| `get_screenshot` | Screenshot file path for an activity ID |
 
 ---
 
@@ -485,15 +493,22 @@ Full Swagger docs at `http://127.0.0.1:7777/docs`
 | `GET` | `/api/timeline?date=2026-05-21` | Activities for a date |
 | `GET` | `/api/search?q=debugging auth` | Hybrid semantic + keyword search |
 | `POST` | `/api/chat` | Conversational AI with screen memory (SSE stream) |
-| `GET` | `/api/stats?range=day` | Analytics (categories, apps, meetings) |
+| `GET` | `/api/stats?date_from=…&date_to=…` | Analytics: categories, apps, tracked hours, meetings |
 | `GET` | `/api/rewind?date=2026-05-21` | Timelapse frames |
-| `POST` | `/api/summary/generate` | Generate AI daily summary |
+| `POST` | `/api/summary/generate?date=…` | Generate AI daily summary (past dates only) |
+| `POST` | `/api/standup/generate?date=…` | Generate standup notes |
+| `POST` | `/api/activities/{id}/reanalyze` | Re-analyze a screenshot, or re-transcribe a voice memo |
+| `DELETE` | `/api/activities/{id}` | Delete an activity with its screenshot / recording |
+| `GET` | `/api/memos?date=…` | Voice memos for a date |
+| `GET` | `/api/meetings?date=…` | Meeting transcripts and summaries |
 | `GET` | `/api/agents` | List all agents |
 | `POST` | `/api/agents/{name}/run` | Trigger agent execution |
 | `GET` | `/api/models` | List available models + variants |
 | `POST` | `/api/models/variant` | Set preferred quantization variant |
-| `DELETE`| `/api/models/delete` | Delete a downloaded model variant |
-| `POST` | `/api/capture/pause` | Pause capture |
+| `POST` | `/api/models/pull` | Download a model variant and start it |
+| `POST` | `/api/models/delete` | Delete a downloaded model variant |
+| `POST` | `/api/capture/pause` · `/api/capture/resume` | Pause / resume capture |
+| `POST` | `/api/capture/bookmark` | Bookmarked screenshot now (refused in incognito) |
 | `POST` | `/api/incognito/toggle` | Toggle incognito mode |
 | `POST` | `/api/shutdown` | Graceful shutdown (localhost only) |
 
@@ -504,23 +519,28 @@ Full Swagger docs at `http://127.0.0.1:7777/docs`
 
 <br>
 
-All settings configurable via `.env`, environment variables, or the **Settings** dashboard (persists to `settings.json`).
+Settings can be changed in the **Settings** dashboard (saved to `~/.screenmind/settings.json`), or set as environment variables / in a `.env` file. Every setting in [`screenmind/config.py`](screenmind/config.py) can be set this way using its name in upper case. Values saved from the dashboard take precedence.
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `CAPTURE_INTERVAL` | `40` | Seconds between captures |
+| `CAPTURE_INTERVAL` | `40` | Max seconds between captures (10–120) |
 | `ANALYSIS_MODE` | `fast` | `fast` (~12s), `balanced` (~40s), or `merged` (~76s, accurate) |
 | `PERFORMANCE_MODE` | `balanced` | GPU layers: `minimal` / `balanced` / `maximum` |
+| `CONTEXT_WINDOW` | `6144` | llama-server context size (2048–16384) |
 | `BLOCKED_APPS` | *(empty)* | Comma-separated apps to never capture |
-| `MEETING_TRANSCRIPTION` | `false` | Auto-transcribe when meeting apps detected |
+| `HEAVY_APPS` | `game,valorant,…` | App-name substrings that pause capture (games, editors) |
+| `MEETING_TRANSCRIPTION` | `false` | Record and transcribe detected meetings |
+| `MEETING_APPS` | `zoom,teams,meet,webex,slack,discord` | Meeting keywords (apps and browser tabs) |
 | `RETENTION_DAYS` | `7` | Auto-delete data older than N days (0 = forever) |
 | `ENCRYPTION_ENABLED` | `false` | Encrypt screenshots at rest |
-| `SENSITIVE_FILTER_ENABLED` | `true` | Redact credit cards, SSNs, API keys |
-| `CAPTURE_PAUSED` | `true` | Persisted capture state across restarts |
+| `SENSITIVE_FILTER_ENABLED` | `true` | Redact credit cards, SSNs, API keys, JWTs, passwords |
+| `AGENTS_ENABLED` | `false` | Run agents on their schedules |
+| `CAPTURE_PAUSED` | `true` | Capture state, persisted across restarts |
+| `DATA_DIR` | `~/.screenmind` | Where all data is stored |
+| `API_PORT` | `7777` | Dashboard / API port |
+| `LLAMA_SERVER_PORT` | `5809` | llama-server port |
 | `SCREENMIND_LOG_LEVEL` | `INFO` | Log verbosity: `DEBUG`, `INFO`, `WARNING`, `ERROR` |
 | `SCREENMIND_LOG_FILE` | *(none)* | Path to a log file (rotating, 10MB × 3 backups) |
-
-> See `.env.example` for the full list.
 
 </details>
 
@@ -582,82 +602,80 @@ recording. For full functionality, use an X11 session or a wlroots-based composi
 <br>
 
 ```
-screenmind/
-├── screenmind/                    # Entry point — starts all services
-├── config.py                  # Pydantic settings (env + runtime overrides)
-├── setup_llama.py             # Auto-detect + install llama-server
-├── launcher.py                # Splash screen launcher (tkinter)
-├── startup.py                 # Cross-platform auto-start registration
-├── requirements.txt           # Full Python dependencies
-├── requirements-test.txt      # Lightweight CI deps (no PyTorch)
-│   ├── main.py              # MCP server for Claude/Cursor/VS Code
-├── screenmind_sdk.py          # SDK for Python plugin agents
+ScreenMind/
+├── screenmind/                   # The Python package
+│   ├── main.py                   # Entry point — starts all services, CLI flags
+│   ├── config.py                 # Settings (.env + settings.json overrides)
+│   ├── launcher.py               # Splash screen launcher (tkinter)
+│   ├── startup.py                # Run-at-login registration
+│   ├── setup_llama.py            # Detect / download llama-server
+│   ├── screenmind_sdk.py         # SDK for Python plugin agents
+│   ├── mcp_server.py             # MCP server for Claude / Cursor / VS Code
+│   │
+│   ├── capture/                  # Screenshot capture layer
+│   │   ├── screen.py             # Capture facade (mss / Wayland backend)
+│   │   ├── wayland.py            # Wayland backend (grim / XDG Portal)
+│   │   ├── window.py             # Active window detection
+│   │   ├── dedup.py              # Perceptual hash deduplication
+│   │   ├── hotkey.py             # Global hotkeys (bookmark, pause, voice)
+│   │   └── voice_recorder.py     # Mic recording for voice memos
+│   │
+│   ├── engine/                   # AI & intelligence layer
+│   │   ├── analyzer.py           # Gemma 4 screenshot analysis (3 modes)
+│   │   ├── llm_client.py         # llama-server client (chat, vision, audio)
+│   │   ├── model_manager.py      # Server lifecycle, model download/switch
+│   │   ├── embedder.py           # MiniLM semantic embeddings
+│   │   ├── ocr.py                # EasyOCR text extraction
+│   │   ├── layout_analyzer.py    # Spatial OCR organization
+│   │   ├── dev_context.py        # Git repo/branch/diff detection
+│   │   ├── a11y_extractor.py     # Accessibility text extraction
+│   │   ├── agent_runner.py       # Agent scheduling & execution
+│   │   ├── voice_memo.py         # Voice memo transcription + storage
+│   │   └── browsers.py           # Browser identification per platform
+│   │
+│   ├── workers/                  # Background processing
+│   │   ├── capture_worker.py     # Smart capture loop, privacy, incognito
+│   │   ├── analysis_worker.py    # OCR → Gemma → Layout → Embed → Store
+│   │   └── audio_worker.py       # Meeting detection & transcription
+│   │
+│   ├── storage/                  # Data persistence
+│   │   ├── database.py           # SQLite + FTS5 + migrations
+│   │   ├── files.py              # Screenshot / recording files and cleanup
+│   │   └── models.py             # Pydantic data models
+│   │
+│   ├── privacy/                  # Privacy & security
+│   │   ├── encryption.py         # Fernet encryption at rest
+│   │   └── data_filter.py        # Sensitive data redaction
+│   │
+│   ├── platform_support/         # Cross-platform abstraction
+│   │   ├── base.py               # PlatformAdapter interface
+│   │   ├── windows.py            # Win32 + UI Automation
+│   │   ├── macos.py              # Quartz + AXUIElement
+│   │   └── linux.py              # xdotool / Wayland IPC + AT-SPI
+│   │
+│   ├── integrations/             # External connections
+│   │   ├── obsidian.py           # Vault markdown export
+│   │   ├── notion.py             # Notion API export
+│   │   ├── webhooks.py           # HTTP webhooks (named hooks, HMAC, retry)
+│   │   └── smart_notify.py       # Distraction / break / focus notifications
+│   │
+│   ├── api/                      # REST API + dashboard
+│   │   ├── server.py             # FastAPI app + PIN middleware
+│   │   ├── dependencies.py       # Shared state for routes
+│   │   ├── serializers.py        # Response shaping for the dashboard
+│   │   ├── routes/               # 16 route modules
+│   │   └── static/               # Web dashboard (HTML + CSS + JS)
+│   │
+│   ├── ui/overlay.py             # On-screen overlay notifications
+│   ├── default_agents/           # 4 built-in agents (.md)
+│   └── assets/                   # Logo, favicon
 │
-│   ├── assets/                    # Bundled resources
-│   ├── logo.png               # App logo
-│   └── favicon.ico            # Browser favicon
-│
-│   ├── capture/                   # Screenshot capture layer
-│   ├── screen.py              # Capture facade (mss / Wayland backend)
-│   ├── wayland.py             # Wayland backend (grim / XDG Portal)
-│   ├── window.py              # Active window detection
-│   ├── dedup.py               # Perceptual hash deduplication
-│   ├── hotkey.py              # Global hotkeys (bookmark, pause, voice)
-│   └── voice_recorder.py      # Mic recording for voice memos
-│
-│   ├── engine/                    # AI & intelligence layer
-│   ├── analyzer.py            # Gemma 4 vision analysis (dual mode)
-│   ├── llm_client.py          # llama-server client (chat, vision, audio)
-│   ├── model_manager.py       # Server lifecycle, model download/switch
-│   ├── embedder.py            # MiniLM semantic embeddings
-│   ├── ocr.py                 # EasyOCR text extraction
-│   ├── layout_analyzer.py     # Spatial OCR organization
-│   ├── dev_context.py         # Git repo/branch/diff detection
-│   ├── a11y_extractor.py      # Accessibility API text extraction
-│   └── agent_runner.py        # Agent scheduling & execution
-│
-│   ├── workers/                   # Background processing
-│   ├── capture_worker.py      # Smart capture loop + privacy filtering
-│   ├── analysis_worker.py     # OCR → Gemma → Layout → Embed → Store
-│   └── audio_worker.py        # Meeting detection & transcription
-│
-│   ├── storage/                   # Data persistence
-│   ├── database.py            # SQLite + FTS5 + migrations
-│   └── models.py              # Pydantic data models
-│
-│   ├── privacy/                   # Privacy & security
-│   ├── encryption.py          # Fernet AES encryption at rest
-│   └── data_filter.py         # Sensitive data redaction
-│
-│   ├── platform_support/          # Cross-platform abstraction
-│   ├── windows.py             # Win32 + UI Automation
-│   ├── macos.py               # AppKit + AXUIElement
-│   └── linux.py               # xdotool + AT-SPI
-│
-│   ├── integrations/              # External connections
-│   ├── obsidian.py            # Vault markdown export
-│   ├── notion.py              # Notion API export
-│   ├── webhooks.py            # HTTP webhooks (HMAC, retry)
-│   └── smart_notify.py        # Distraction/break notifications
-│
-│   ├── api/                       # REST API + dashboard
-│   ├── server.py              # FastAPI app + auth middleware
-│   ├── dependencies.py        # Shared state for routes
-│   ├── routes/                # 16 route modules
-│   └── static/                # Web dashboard (HTML + CSS + JS)
-│
-├── default_agents/            # 4 built-in agents
-│   ├── daily-journal.md
-│   ├── focus-report.md
-│   ├── meeting-actions.md
-│   └── code-changelog.md
-│
-├── tests/                     # pytest test suite (29 modules)
-│   ├── conftest.py            # Shared fixtures
-│   └── test_*.py              # Unit + integration tests
-│
-└── docs/
-    └── BUILD_YOUR_OWN_AGENT.md
+├── tests/                        # pytest suite
+├── docs/                         # BUILD_YOUR_OWN_AGENT.md, screenshots
+├── architecture.md               # System design deep-dive
+├── MCP_SETUP.md                  # MCP client setup
+├── requirements.txt              # Full pinned dependencies
+└── requirements-test.txt         # Lightweight CI dependencies (no PyTorch)
 ```
 
 </details>
@@ -675,11 +693,13 @@ screenmind/
 | **Duplicate frames** | pHash dedup skips identical screenshots (threshold: 8 hamming distance). |
 | **Stale queue items** | Captures >3 min old auto-skipped. Backfilled during idle. |
 | **App in blocklist** | Silently skips — no screenshot saved. |
-| **Meeting app closed** | Process-alive check + silence detection + 5-min hard timeout. |
-| **Voice transcription fails** | Audio + screenshot saved to DB regardless. Playable in Memos tab. `<unusedN>` garbage tokens auto-stripped. |
+| **Meeting app closed** | Process-alive check (native apps) + silence detection + 5-min timeout away from the meeting. |
+| **Voice transcription fails** | Audio + screenshot saved regardless. Playable in the Memos tab, and can be re-transcribed later. `<unusedN>` garbage tokens auto-stripped. |
 | **Chat during analysis** | Cancels in-flight inference, frees GPU in <1s, re-queues analysis. |
 | **Re-analyze triggered** | Full context (app name, title, URLs) passed — same quality as original analysis. |
 | **Crash recovery** | Stale meetings cleaned on startup. Unanalyzed entries backfilled. Capture pause state persisted. |
+| **Corrupt settings file** | `settings.json` is written atomically; an unreadable file is kept as `settings.json.corrupt-<timestamp>` instead of being overwritten. |
+| **llama-server starts late** | Analysis resumes and meeting transcription becomes available within 30s of the server coming up. |
 
 ---
 
@@ -690,10 +710,13 @@ The web dashboard at `http://127.0.0.1:7777` features:
 - **Timeline** — Browse activities by date with thumbnails, AI summaries, category badges
 - **Chat** — Conversational AI with screen memory. Ask anything about your history. Locked with 🧠💤 brain animation until model is ready.
 - **Search** — Semantic + keyword hybrid search with OCR highlighting on screenshots
-- **Analytics** — Category charts, top apps, hourly heatmap, meeting stats
+- **Analytics** — Category and top-app charts, tracked hours, meeting stats and analysis status for a day, week or month
 - **Rewind** — Timelapse player with play/pause/scrub/speed controls
-- **Memos** — Voice memo list with audio player
+- **Memos** — Voice memos with audio player, transcript and re-transcribe
 - **Agents** — Create, edit, run, and monitor agents
+- **Bookmarks** — Everything you bookmarked (hotkey, menu, or auto-bookmark keywords)
+- **Meetings** — Recorded meetings with structured summaries and full transcripts
+- **Summary** — AI daily summary and standup notes for any past day
 - **Settings** — Model Hub (download/switch models with progress), Shortcuts, Capture, AI, Audio, Privacy, Automation, Integrations, Storage
 
 Dark glassmorphism UI. No build step. Instant load.
@@ -705,17 +728,17 @@ Dark glassmorphism UI. No build step. Instant load.
 Run the test suite:
 
 ```bash
-# Fast (lightweight deps — same as CI, ~2 min install)
+# Fast (lightweight deps — same as CI, no PyTorch)
 pip install -r requirements-test.txt
-pytest --cov=. --cov-report=term-missing -q
+pip install -e .
+pytest --cov=screenmind --cov-report=term-missing -q
 
-# Full (includes ML models — sentence-transformers, easyocr)
-pip install -r requirements.txt
-pip install pytest pytest-asyncio pytest-cov
-pytest --cov=. --cov-report=term-missing -q
+# Full (includes the ML stack — sentence-transformers, easyocr)
+pip install -e ".[ai,dev]"
+pytest --cov=screenmind --cov-report=term-missing -q
 ```
 
-CI runs automatically on push/PR via GitHub Actions using the lightweight deps.
+CI runs on every push/PR (Windows, Python 3.10) with the lightweight deps, plus a JavaScript syntax check and a no-`print()` lint. See [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ---
 

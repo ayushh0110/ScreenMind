@@ -1,3 +1,22 @@
+// Sensitive-data filter types shown as checkboxes (keys from privacy/data_filter.py)
+var _FILTER_TYPES = ['credit_card', 'ssn', 'api_key', 'jwt', 'password', 'email'];
+var _savedFilterTypes = '';
+
+function _parseFilterTypes(str) {
+  return (str || '').split(',').map(function(t) { return t.trim(); }).filter(Boolean);
+}
+
+// Checked boxes, plus any saved type this page doesn't show, so a filter
+// added later can't be silently dropped by saving from an older page.
+function _collectFilterTypes() {
+  var types = [];
+  document.querySelectorAll('.filter-type-cb:checked').forEach(function(cb) { types.push(cb.value); });
+  _parseFilterTypes(_savedFilterTypes).forEach(function(t) {
+    if (_FILTER_TYPES.indexOf(t) < 0 && types.indexOf(t) < 0) types.push(t);
+  });
+  return types.join(',');
+}
+
 async function renderSettings(el) {
   el.innerHTML = '<div class="spinner"></div>';
   let cfg, startupStatus;
@@ -16,6 +35,10 @@ async function renderSettings(el) {
   function _rp(name, val, label, cur) { return '<label class="radio-pill ' + (String(cur) === String(val) ? 'active' : '') + '"><input type="radio" name="' + name + '" value="' + val + '" ' + (String(cur) === String(val) ? 'checked' : '') + '> ' + label + '</label>'; }
 
   var wh_events = (cfg.webhook_events || 'daily_summary,standup').split(',');
+  _savedFilterTypes = cfg.sensitive_filter_types || '';
+  // An empty value means "all default types" on the backend (parse_enabled_types)
+  var activeFilterTypes = _parseFilterTypes(_savedFilterTypes);
+  if (!activeFilterTypes.length) activeFilterTypes = ['credit_card', 'ssn', 'api_key', 'jwt', 'password'];
 
   el.innerHTML = '<div class="settings-grid">'
 
@@ -181,9 +204,9 @@ async function renderSettings(el) {
   + '<div class="settings-card"><div class="settings-card-header"><div><div class="settings-title">Sensitive Data Filter</div><div class="settings-desc">Auto-redact PII from captured text before storage</div></div>'
   + _sw('sensitive-filter-enabled', cfg.sensitive_filter_enabled) + '</div>'
   + '<div style="display:flex;flex-direction:column;gap:6px;margin-top:4px">'
-  + ['credit_card','ssn','api_key','password','email'].map(function(t) {
-      var checked = (cfg.sensitive_filter_types || '').indexOf(t) >= 0 ? 'checked' : '';
-      var labels = {credit_card:'Credit Cards', ssn:'SSN/ID Numbers', api_key:'API Keys', password:'Passwords', email:'Email Addresses'};
+  + _FILTER_TYPES.map(function(t) {
+      var checked = activeFilterTypes.indexOf(t) >= 0 ? 'checked' : '';
+      var labels = {credit_card:'Credit Cards', ssn:'SSN/ID Numbers', api_key:'API Keys', jwt:'JWT Tokens', password:'Passwords', email:'Email Addresses'};
       return '<label style="display:flex;align-items:center;gap:8px;font-size:0.82rem;color:var(--text-secondary);cursor:pointer"><input type="checkbox" class="filter-type-cb" value="' + t + '" ' + checked + ' style="accent-color:var(--accent)"> ' + labels[t] + '</label>';
     }).join('') + '</div></div>'
 
@@ -528,11 +551,7 @@ window.saveSettings = async function() {
     break_reminder_minutes: parseInt(document.getElementById('break-reminder-minutes').value) || 90,
     // Privacy
     sensitive_filter_enabled: document.getElementById('sensitive-filter-enabled').checked,
-    sensitive_filter_types: (function() {
-      var types = [];
-      document.querySelectorAll('.filter-type-cb:checked').forEach(function(cb) { types.push(cb.value); });
-      return types.join(',');
-    })(),
+    sensitive_filter_types: _collectFilterTypes(),
     dashboard_lock_timeout: parseInt(document.getElementById('dashboard-lock-timeout').value) || 30,
     encryption_enabled: document.getElementById('encryption-enabled').checked,
     // Hotkeys

@@ -1,6 +1,6 @@
 # ScreenMind MCP Server Setup
 
-ScreenMind includes an MCP (Model Context Protocol) server that lets AI assistants like **Claude Desktop**, **Cursor**, **VS Code** (via Cline/Continue), and any MCP-compatible client query your screen history directly.
+ScreenMind includes an MCP (Model Context Protocol) server that lets AI assistants like **Claude Desktop**, **Claude Code**, **Cursor**, **VS Code** and any other MCP client query your screen history directly.
 
 ## What It Does
 
@@ -8,28 +8,36 @@ The MCP server exposes your ScreenMind data as **tools** that AI assistants can 
 
 | Tool | Description |
 |---|---|
-| `search_screen` | Search screen history using natural language (semantic + keyword) |
-| `get_recent_activity` | Get the most recent N screen activities |
-| `get_activity_by_time` | Get activities for a specific date/time range |
-| `get_daily_summary` | Get AI-generated daily summary and standup notes |
-| `capture_now` | Trigger an instant screenshot capture |
-| `get_stats` | Get overall statistics about your screen history |
-| `search_audio` | Search meeting transcripts |
-| `get_screenshot` | Get a screenshot image for a specific activity |
+| `search_screen` | Search screen history in natural language (semantic + keyword) |
+| `get_recent_activity` | The most recent N analyzed activities (max 50) |
+| `get_activity_by_time` | Activities for a date (`YYYY-MM-DD`), optionally between two hours |
+| `get_daily_summary` | The AI-generated daily summary and standup notes for a date |
+| `capture_now` | Trigger an instant bookmarked screenshot (needs the app running) |
+| `get_stats` | Statistics for the last 7 days (categories, apps, repos, meetings) |
+| `search_audio` | Search meeting transcripts and summaries |
+| `get_screenshot` | The file path of the screenshot for an activity ID |
+
+It also provides one resource, `screenmind://status`, with the active model and capture settings.
 
 ## Setup
 
-### 1. Install Dependencies
+### 1. Install the MCP extra
+
+Install it into the **same Python environment** as ScreenMind:
 
 ```bash
-pip install "mcp[cli]"
+pip install "screenmind[mcp]"
 ```
 
-### 2. Configure Your AI Client
+For semantic search the server also needs the AI extra (`pip install "screenmind[ai]"`). Without it, `search_screen` falls back to keyword search.
+
+### 2. Configure your AI client
+
+The server runs as `python -m screenmind.mcp_server` (stdio transport). Clients often don't see your activated virtualenv, so especially on Windows, set `command` to the **full path of the Python executable** that has ScreenMind installed, e.g. `C:\Users\you\venv\Scripts\python.exe` (in JSON, write each backslash as `\\`).
 
 #### Claude Desktop
 
-Edit your Claude Desktop config file:
+Edit the config file:
 - **Windows**: `%APPDATA%\Claude\claude_desktop_config.json`
 - **macOS**: `~/Library/Application Support/Claude/claude_desktop_config.json`
 
@@ -38,73 +46,86 @@ Edit your Claude Desktop config file:
   "mcpServers": {
     "screenmind": {
       "command": "python",
-      "args": ["C:/path/to/screenmind/screenmind.mcp_server"]
+      "args": ["-m", "screenmind.mcp_server"]
     }
   }
 }
 ```
 
-Replace `C:/path/to/screenmind/` with the actual path to your ScreenMind installation.
+#### Claude Code
+
+```bash
+claude mcp add screenmind -- python -m screenmind.mcp_server
+```
 
 #### Cursor
 
-Go to **Settings → MCP** and add:
+Add to `~/.cursor/mcp.json` (or **Settings → MCP**):
+
 ```json
 {
-  "screenmind": {
-    "command": "python",
-    "args": ["C:/path/to/screenmind/screenmind.mcp_server"]
+  "mcpServers": {
+    "screenmind": {
+      "command": "python",
+      "args": ["-m", "screenmind.mcp_server"]
+    }
   }
 }
 ```
 
-#### VS Code (via Cline or Continue)
+#### VS Code
 
-Add to your MCP configuration in `.vscode/mcp.json`:
+Add to `.vscode/mcp.json` in your workspace:
+
 ```json
 {
   "servers": {
     "screenmind": {
+      "type": "stdio",
       "command": "python",
-      "args": ["C:/path/to/screenmind/screenmind.mcp_server"]
+      "args": ["-m", "screenmind.mcp_server"]
     }
   }
 }
 ```
 
-### 3. Restart Your AI Client
+### 3. Restart your AI client
 
-After saving the configuration, restart your AI client. You should see "ScreenMind" listed as an available MCP server with 8 tools.
+After saving the configuration, restart the client. ScreenMind should appear with 8 tools.
 
 ## Testing
 
-You can test the MCP server locally using the MCP Inspector:
+Test the server with the MCP Inspector:
 
 ```bash
 npx @modelcontextprotocol/inspector python -m screenmind.mcp_server
 ```
 
-This opens a web UI at `http://127.0.0.1:6274` where you can test each tool interactively.
+This opens a web UI where you can call each tool interactively.
 
 ## Example Prompts
 
-Once connected, try asking your AI assistant:
+- *"What was I working on today?"* → `get_recent_activity`
+- *"Search my screen for discord messages"* → `search_screen`
+- *"What did I do between 2pm and 5pm yesterday?"* → `get_activity_by_time`
+- *"Give me my daily summary"* → `get_daily_summary`
+- *"What did we decide in today's standup call?"* → `search_audio`
+- *"Take a screenshot right now"* → `capture_now`
 
-- *"What was I working on today?"* → calls `get_recent_activity`
-- *"Search my screen for discord messages"* → calls `search_screen`
-- *"What did I do between 2pm and 5pm yesterday?"* → calls `get_activity_by_time`
-- *"Give me my daily summary"* → calls `get_daily_summary`
-- *"Take a screenshot right now"* → calls `capture_now`
+## How It Works
+
+- The MCP server is a **separate process**. It reads ScreenMind's local SQLite database directly, so search and history tools work even when the ScreenMind app isn't running.
+- `capture_now` asks the running app to take a bookmarked screenshot through its local API (`127.0.0.1:7777`). It returns an error if the app isn't running, and captures nothing while **incognito mode** is on.
+- `get_screenshot` returns a file path inside ScreenMind's screenshots folder. If screenshot encryption is enabled, the file at that path is encrypted.
 
 ## Privacy
 
-- The MCP server runs **locally** on your machine
-- Data never leaves your computer — the AI client queries your local SQLite database
-- The server is read-only (except `capture_now` which triggers a local screenshot)
-- No API keys or cloud services required
+- The MCP server runs **locally** and only reads your local database.
+- Your screen history is sent to the AI client you connect — and from there to that client's model provider (for example Anthropic for Claude Desktop). Only connect clients you trust with this data.
+- Every tool is read-only except `capture_now`, which triggers a local screenshot.
 
 ## Requirements
 
-- ScreenMind must be installed and have captured some screen data
-- For `capture_now` to work, the ScreenMind app must be running (`screenmind` or `python -m screenmind`)
-- Python environment with `mcp[cli]` installed
+- ScreenMind installed, with some captured screen data
+- `mcp[cli]` installed in the same environment (`pip install "screenmind[mcp]"`)
+- The ScreenMind app running, for `capture_now` only
