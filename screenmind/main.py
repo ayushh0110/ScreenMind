@@ -29,23 +29,6 @@ from screenmind.api.server import create_app
 logger = logging.getLogger("screenmind.main")
 
 
-def check_llama_server() -> bool:
-    """Check if llama-server is reachable and ready for inference."""
-    from screenmind.engine import llm_client
-
-    status = llm_client.get_server_status()
-    if status["status"] == "ok":
-        logger.info(f"OK - llama-server online at {settings.llama_server_host}")
-        return True
-    elif status["status"] == "unreachable":
-        logger.error(f"FAIL - Cannot reach llama-server at {settings.llama_server_host}")
-        logger.info(f"Start it with: llama-server -hf ggml-org/gemma-4-E2B-it-GGUF:gemma-4-E2B-it-Q4_0 --mmproj-auto -ngl 99 --port {settings.llama_server_port}")
-        return False
-    else:
-        logger.info(f"WARN - llama-server issue: {status['detail']}")
-        return False
-
-
 def check_disk_space():
     """Warn if disk space is low."""
     try:
@@ -173,26 +156,26 @@ async def main():
         _safe_print("=" * 70)
     _safe_print()
 
-    # ── llama-server setup ─────────────────────────────────────────────
-    # Check if llama-server binary is available; offer to install if missing
-    from screenmind.setup_llama import ensure_llama_server
-    llama_binary_available = ensure_llama_server()
-
-    # ── Health checks ────────────────────────────────────────────────
+    # ── llama-server ─────────────────────────────────────────────────
+    # A server already answering at LLAMA_SERVER_HOST (started by hand, by
+    # another tool, or on another machine) is used as-is — no local binary
+    # needed. Only when nothing answers do we look for (or offer to install)
+    # the binary and start our own.
     from screenmind.engine import model_manager
-    if llama_binary_available:
-        # Binary exists — check if server is running, start if not
-        if not check_llama_server():
+    llama_binary_available = False
+    if model_manager.sync_external_server():
+        logger.info(f"OK - using llama-server already running at {settings.llama_server_host}")
+        llm_server_ok = True
+    else:
+        from screenmind.setup_llama import ensure_llama_server
+        llama_binary_available = ensure_llama_server()
+        if llama_binary_available:
             logger.info("llama-server not running — starting automatically...")
             llm_server_ok = model_manager.start_server(settings.active_model, timeout=120)
         else:
-            llm_server_ok = True
-            # Detect what model the external server has loaded
-            detection = model_manager.detect_running_model()
-            if detection:
-                model_manager.adopt_external_server(detection)
-    else:
-        llm_server_ok = False
+            llm_server_ok = False
+    # Pick up an external server started, restarted or swapped later on
+    model_manager.start_external_watcher()
 
     check_disk_space()
     if not llm_server_ok:

@@ -25,6 +25,10 @@ from screenmind.storage.models import ScreenshotEntry
 
 logger = logging.getLogger("screenmind.workers.capture_worker")
 
+# Seconds between change checks after a save (active mode), and the wait
+# before a window *title* change wakes an idle check
+CHANGE_COOLDOWN = 10
+
 
 @dataclass
 class CaptureResult:
@@ -63,7 +67,10 @@ class CaptureWorker:
         self._capture_count = 0
         self._skip_count = 0
         self._pending_bookmark = False
-        self._last_save_time = 0.0
+        # time.monotonic() — immune to system clock changes; -inf = never
+        self._last_save_time = float("-inf")
+        self._last_check_time = float("-inf")  # Last change check, saved or not
+        self._last_window: Optional[tuple] = None  # (app, title) at last check
         self._consecutive_skips = 0  # Track idle state
         self._audio_worker = None  # Set by main.py for meeting detection
         # Incognito: nothing is recorded — no captures, bookmarks or meetings
@@ -72,9 +79,11 @@ class CaptureWorker:
     async def run(self):
         """
         Main capture loop.
-        Smart polling: checks every 5s, saves only on content change.
-        Forces a capture every 30s (capture_interval) even if no change.
-        Idle detection: if screen unchanged for 3+ checks, extends poll to 30s.
+        Smart polling: wakes every 5s, checks for a change at most every 10s
+        after the last save, and saves only when the screen content changed.
+        Idle detection: once 3 checks in a row find nothing new (unchanged
+        screen or failed grab), checks only every capture_interval — or
+        sooner when the active window changes (see _window_changed).
         """
         self._running = True
         logger.info(
@@ -105,24 +114,23 @@ class CaptureWorker:
                 pass
 
             if not self._paused:
-                now = time.time()
-                since_last = now - self._last_save_time
+                now = time.monotonic()
+                since_save = now - self._last_save_time
+                trigger = "periodic" if since_save >= settings.capture_interval else "change"
 
-                # Idle detection: if 3+ consecutive skips, user is idle
-                # Extend interval to capture_interval (30s) instead of 5s polling
                 if self._consecutive_skips >= 3:
-                    # Idle mode — only check at max interval
-                    if since_last >= settings.capture_interval:
-                        await self._capture_tick(trigger="periodic")
-                else:
-                    # Active mode — normal polling
-                    if since_last >= settings.capture_interval:
-                        await self._capture_tick(trigger="periodic")
-                    elif since_last >= 10:
-                        # Content-change check: 10s cooldown prevents burst
-                        # captures during scrolling while still catching
-                        # meaningful screen changes promptly
-                        await self._capture_tick(trigger="change")
+                    # Idle mode — nothing new for 3+ checks. Throttle on the
+                    # last *check*: an unchanged screen never saves, so the
+                    # last save time would keep every poll overdue.
+                    since_check = now - self._last_check_time
+                    if (since_check >= settings.capture_interval
+                            or self._window_changed(since_check)):
+                        await self._capture_tick(trigger=trigger)
+                elif since_save >= CHANGE_COOLDOWN:
+                    # Active mode — 10s cooldown after a save prevents burst
+                    # captures during scrolling while still catching
+                    # meaningful screen changes promptly
+                    await self._capture_tick(trigger=trigger)
                 # else: too soon, skip
 
             # Poll every 5 seconds (fast enough to catch content changes)
@@ -131,8 +139,30 @@ class CaptureWorker:
                     break
                 await asyncio.sleep(0.5)
 
+    def _window_changed(self, since_check: float) -> bool:
+        """True if the active window changed since the last check.
+
+        An app switch counts right away. A title change within the same app
+        (new tab or document, but also unread counters, timers, progress)
+        only once CHANGE_COOLDOWN has passed, so a title that ticks every
+        second can't keep an idle screen checking every 5s.
+
+        Records the window it reports, so each change wakes one check — even
+        when that check stops early (blocked or heavy app) and never gets to
+        record the window itself.
+        """
+        current = (get_active_app_name(), get_active_window_title())
+        if current == self._last_window:
+            return False
+        app_switched = self._last_window is None or current[0] != self._last_window[0]
+        if not app_switched and since_check < CHANGE_COOLDOWN:
+            return False
+        self._last_window = current
+        return True
+
     async def _capture_tick(self, trigger="periodic"):
         """Capture a screenshot and enqueue if content changed."""
+        self._last_check_time = time.monotonic()
         try:
             # Check privacy zones
             app_name = get_active_app_name()
@@ -155,26 +185,27 @@ class CaptureWorker:
                     self._heavy_app_logged = None
 
             window_title = get_active_window_title()
+            self._last_window = (app_name, window_title)
 
-            # Capture screenshot
-            result = self._screen.capture()
-            if result is None:
+            # Grab into memory — nothing touches disk until we know it's new
+            image = self._screen.grab()
+            if image is None:
+                # Failed grab (e.g. Wayland portal error): back off like an
+                # unchanged screen instead of retrying every poll
+                self._consecutive_skips += 1
                 return
-
-            filepath, image = result
 
             # Check for duplicate (content-change detection)
             monitor_key = self._screen.last_monitor_key
             if self._dedup.is_duplicate(image, monitor_key=monitor_key):
                 self._skip_count += 1
                 self._consecutive_skips += 1
-                try:
-                    filepath.unlink()
-                except OSError:
-                    pass
                 return
 
             # Content has changed! Save it.
+            filepath = self._screen.save(image)
+            if filepath is None:
+                return
             self._consecutive_skips = 0  # Reset idle detection
             now = datetime.now()
 
@@ -211,7 +242,7 @@ class CaptureWorker:
 
             await self._queue.put(capture_result)
             self._capture_count += 1
-            self._last_save_time = time.time()
+            self._last_save_time = time.monotonic()
 
             trigger_label = "[snap]" if trigger == "periodic" else "[change]"
             logger.info(
@@ -337,6 +368,9 @@ class CaptureWorker:
         if not self._paused:
             return  # Already running — skip redundant persist + log
         self._paused = False
+        # Start in active mode: idle mode would wait up to capture_interval
+        # since the last check before the first capture after resuming
+        self._consecutive_skips = 0
         try:
             settings.save_runtime_overrides({"capture_paused": False})
         except Exception:

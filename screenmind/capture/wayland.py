@@ -11,7 +11,6 @@ import os
 import shutil
 import subprocess
 import time
-from datetime import datetime
 from pathlib import Path
 from typing import Optional, Tuple
 
@@ -114,28 +113,13 @@ class WaylandScreenCapture:
 
     # ── Public API (matches ScreenCapture interface) ────────────────
 
-    def capture(self) -> Optional[Tuple[Path, Image.Image]]:
-        """Capture screenshot, save as JPEG, return (path, PIL.Image)."""
-        img = self._grab()
-        if img is None:
-            return None
+    def grab(self) -> Optional[Image.Image]:
+        """Capture screenshot into memory (no save, no encrypt).
 
-        now = datetime.now()
-        date_dir = settings.screenshots_dir / now.strftime("%Y-%m-%d")
-        date_dir.mkdir(parents=True, exist_ok=True)
-
-        filename = f"{now.strftime('%H-%M-%S')}_{int(now.timestamp() * 1000) % 1000:03d}.jpg"
-        filepath = date_dir / filename
-        img.save(str(filepath), "JPEG", quality=settings.screenshot_quality, optimize=True)
-
-        # Encrypt at rest if enabled (no-op when encryption_enabled=False)
-        try:
-            from screenmind.privacy.encryption import encrypt_image
-            encrypt_image(filepath)
-        except Exception:
-            pass  # Never fail capture due to encryption
-
-        return filepath, img
+        ScreenCapture saves it (save_screenshot) once the capture worker
+        has deduped it.
+        """
+        return self._grab()
 
     def capture_to_bytes(self) -> Optional[Tuple[bytes, Image.Image]]:
         """Capture screenshot, return as (JPEG bytes, PIL.Image)."""

@@ -304,7 +304,7 @@ class TestV7MigrationBackfill:
         db2.close()
 
     def test_schema_version_bumped_to_7(self, tmp_path):
-        """After migration, schema_version should be 7."""
+        """After migration, schema_version should be at least 7."""
         db_path = tmp_path / "legacy.db"
         conn = _create_v6_database(db_path)
         conn.close()
@@ -314,7 +314,18 @@ class TestV7MigrationBackfill:
         version = conn.execute(
             "SELECT MAX(version) FROM schema_version"
         ).fetchone()[0]
-        assert version == 7
+        assert version >= 7
+        db.close()
+
+    def test_v8_adds_summary_generation_times(self, tmp_path):
+        """v8 adds per-part generation times to an existing daily_summaries table."""
+        db_path = tmp_path / "legacy.db"
+        conn = _create_v6_database(db_path)
+        conn.close()
+
+        db = Database(db_path=db_path)
+        cols = {r[1] for r in db._get_conn().execute("PRAGMA table_info(daily_summaries)")}
+        assert {"standup", "summary_generated_at", "standup_generated_at"} <= cols
         db.close()
 
     def test_status_index_created(self, tmp_path):

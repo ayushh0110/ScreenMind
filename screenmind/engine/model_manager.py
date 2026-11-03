@@ -86,7 +86,9 @@ _active_model_key: Optional[str] = None
 
 # External server state — set when we detect a server we didn't spawn
 _external_server: bool = False
+_external_loading: bool = False  # external server answers /health with 503
 _external_model_name: Optional[str] = None  # model ID for non-listed models
+EXTERNAL_PROBE_INTERVAL = 10.0  # seconds between background external server probes
 
 # Download state — single-flight + thread-safe reads/writes
 _download_lock = threading.Lock()      # guards the entire download→start lifecycle
@@ -139,6 +141,29 @@ def cancel_download() -> bool:
 
 
 # ── External server detection ──────────────────────────────────────────
+# An llama-server we didn't spawn — started by hand, by another tool, or on
+# another machine — is found at LLAMA_SERVER_HOST (the URL llm_client sends
+# requests to), not at 127.0.0.1:LLAMA_SERVER_PORT, which is only where we
+# spawn our own.
+
+def _server_url() -> str:
+    return settings.llama_server_host.rstrip("/")
+
+
+def _probe_health() -> str:
+    """Probe LLAMA_SERVER_HOST/health: "ok", "loading" (503 while llama-server
+    loads a model) or "down" (unreachable, or not an llama-server)."""
+    try:
+        import httpx
+        r = httpx.get(f"{_server_url()}/health", timeout=2)
+    except Exception:
+        return "down"
+    if r.status_code == 200:
+        return "ok"
+    if r.status_code == 503:
+        return "loading"
+    return "down"
+
 
 def detect_running_model() -> Optional[dict]:
     """
@@ -150,8 +175,7 @@ def detect_running_model() -> Optional[dict]:
     """
     try:
         import httpx
-        port = settings.llama_server_port
-        r = httpx.get(f"http://127.0.0.1:{port}/v1/models", timeout=3)
+        r = httpx.get(f"{_server_url()}/v1/models", timeout=3)
         if r.status_code != 200:
             return None
         data = r.json()
@@ -178,19 +202,94 @@ def detect_running_model() -> Optional[dict]:
 
 def adopt_external_server(detection: dict) -> None:
     """
-    Record that an externally-started server is active.
-    Called from main.py when check_llama_server() finds a running server.
+    Record that an externally-started server is active (and ready).
+    Called by sync_external_server() on every probe, so it only logs when the
+    adopted model changes.
     """
-    global _active_model_key, _external_server, _external_model_name
-    _external_server = True
+    global _active_model_key, _external_server, _external_model_name, _external_loading
     if detection.get("matched"):
-        _active_model_key = detection["key"]
-        _external_model_name = None
-        logger.info(f"Adopted external server: {detection['name']} ({detection.get('quant', '?')})")
+        key, name = detection["key"], None
     else:
+        key, name = None, detection.get("name", "Unknown model")
+    changed = not _external_server or (key, name) != (_active_model_key, _external_model_name)
+    _external_server = True
+    _external_loading = False
+    _active_model_key = key
+    _external_model_name = name
+    if changed:
+        if key:
+            logger.info(f"Adopted external server: {detection['name']} ({detection.get('quant', '?')})")
+        else:
+            logger.info(f"Adopted external server: {name} (not in model list)")
+
+
+def _drop_external_server() -> None:
+    """Forget the external server (it went away)."""
+    global _active_model_key, _external_server, _external_model_name, _external_loading
+    if _external_server:
+        logger.info("External llama-server is no longer reachable")
         _active_model_key = None
-        _external_model_name = detection.get("name", "Unknown model")
-        logger.info(f"Adopted external server: {_external_model_name} (not in model list)")
+    _external_server = False
+    _external_loading = False
+    _external_model_name = None
+
+
+def is_external_server() -> bool:
+    """True when the llama-server in use was started outside ScreenMind."""
+    return _external_server
+
+
+def sync_external_server() -> bool:
+    """
+    Detect, adopt, refresh or drop an llama-server we didn't spawn.
+
+    Probes LLAMA_SERVER_HOST. Called at startup, by the background watcher
+    every EXTERNAL_PROBE_INTERVAL seconds, and before a switch/restart.
+    Skipped while we own a server process or a download/switch/restart is in
+    progress. A server still loading its model (503) is kept as
+    external-but-loading so we never spawn a second server onto its port.
+    Returns whether an external server is in use.
+    """
+    global _external_server, _external_loading
+    # Never block on start_server(): it holds the lock while our server boots
+    if not _server_lock.acquire(blocking=False):
+        return _external_server
+    try:
+        if _owns_server() or get_download_state()["active"]:
+            return _external_server
+        health = _probe_health()
+        if health == "ok":
+            adopt_external_server(
+                detect_running_model() or {"matched": False, "name": "Unknown model"}
+            )
+            _clear_error_state()  # e.g. a Retry that lost the port to this server
+        elif health == "loading":
+            if not _external_server:
+                logger.info("External llama-server found, still loading its model")
+            _external_server = True
+            _external_loading = True
+        else:
+            _drop_external_server()
+        return _external_server
+    finally:
+        _server_lock.release()
+
+
+def start_external_watcher() -> threading.Thread:
+    """Re-check for an external server in the background, so one started,
+    restarted or swapped after ScreenMind starts is picked up without a
+    restart — and status polls never wait on the network."""
+    def _loop():
+        while True:
+            time.sleep(EXTERNAL_PROBE_INTERVAL)
+            try:
+                sync_external_server()
+            except Exception as e:
+                logger.debug(f"External server check failed: {e}")
+
+    t = threading.Thread(target=_loop, name="external-llama-watcher", daemon=True)
+    t.start()
+    return t
 
 
 # ── Model directory + variant helpers ──────────────────────────────────
@@ -255,7 +354,13 @@ def is_audio_capable(key: Optional[str] = None) -> bool:
 
 
 def get_active_capabilities() -> dict:
-    """Get capability flags for the active model."""
+    """Get capability flags for the active model.
+
+    For an external server running a model we don't recognise, both are
+    None (unknown) — not the configured model's capabilities.
+    """
+    if _external_server and _external_model_name and not _owns_server():
+        return {"audio": None, "vision": None}
     k = get_active_model() or settings.active_model
     info = get_model_info(k)
     if not info:
@@ -466,9 +571,12 @@ def start_server(model_key: Optional[str] = None, timeout: int = 60, hf_file: st
         return False
 
     with _server_lock:
-        # Clear external server state — we're taking over
-        global _external_server, _external_model_name
+        # Clear external server state — we're taking over. Callers check
+        # is_external_server() first; spawning onto an external server's
+        # port would fail.
+        global _external_server, _external_model_name, _external_loading
         _external_server = False
+        _external_loading = False
         _external_model_name = None
 
         # Already running with this model?
@@ -629,6 +737,9 @@ def switch_model(key: str) -> bool:
     info = get_model_info(key)
     if not info:
         return False
+    if _external_server:
+        logger.warning("Cannot switch models — llama-server is managed externally")
+        return False
     if not is_model_downloaded(key):
         logger.warning(f"Cannot switch to {key} — not downloaded")
         return False
@@ -683,6 +794,9 @@ def restart_server() -> bool:
     and prevents concurrent retries from racing each other.
     Sets transient 'starting' state so UI shows "Booting up..." instead of "error".
     """
+    if _external_server:
+        logger.warning("Cannot restart — llama-server is managed externally")
+        return False
     if not _download_lock.acquire(blocking=False):
         logger.warning("Lifecycle in progress, retry ignored")
         return False
@@ -710,19 +824,20 @@ def get_active_model() -> Optional[str]:
     return _active_model_key
 
 
+def _owns_server() -> bool:
+    """True if the llama-server process we spawned is alive."""
+    return _server_process is not None and _server_process.poll() is None
+
+
 def is_server_running() -> bool:
-    """Check if llama-server process is alive (internal or external)."""
-    if _server_process is not None and _server_process.poll() is None:
+    """Check if llama-server is up and ready (ours or external).
+
+    No network call: external state is kept current by sync_external_server()
+    (startup + background watcher), so this is safe from async routes.
+    """
+    if _owns_server():
         return True
-    if _external_server:
-        # External server — verify it's still responding
-        try:
-            import httpx
-            r = httpx.get(f"http://127.0.0.1:{settings.llama_server_port}/health", timeout=2)
-            return r.status_code == 200
-        except Exception:
-            return False
-    return False
+    return _external_server and not _external_loading
 
 
 def get_model_status() -> dict:
@@ -738,6 +853,7 @@ def get_model_status() -> dict:
     dl = get_download_state()
     active = get_active_model() or settings.active_model
     caps = get_active_capabilities()
+    external = _external_server and not _owns_server()
 
     # Check download/lifecycle state first (active=True means lifecycle in progress)
     if dl["active"]:
@@ -765,12 +881,25 @@ def get_model_status() -> dict:
             "message": dl["message"],
         }
 
+    # External server still loading its model — it will be ready shortly
+    if external and _external_loading:
+        return {
+            "status": "starting",
+            "active_model": active,
+            "model_downloaded": True,
+            "external": True,
+            "capabilities": caps,
+            "download": None,
+            "message": "External llama-server is loading a model...",
+        }
+
     # No download in progress — check server
     if is_server_running():
         return {
             "status": "ready",
             "active_model": active,
             "model_downloaded": True,
+            "external": external,
             "external_model": _external_model_name,
             "capabilities": caps,
             "download": None,
@@ -890,6 +1019,16 @@ def download_and_start(key: str, quant: str = None) -> bool:
         if not ok:
             # Error state is already set by _do_download — leave it sticky
             return False
+
+        # An external server owns the port — keep using it. The download is
+        # there for when ScreenMind manages llama-server itself again.
+        if _external_server:
+            logger.info(f"Downloaded {key}; not starting it — external llama-server in use")
+            _set_download_state(
+                active=False, status="idle", model=None,
+                downloaded_bytes=0, message="",
+            )
+            return True
 
         # Transition to "starting" state
         _set_download_state(status="starting", message="Starting model server...")

@@ -4,7 +4,7 @@ var meetingsDate = localToday();  // local date — toISOString() would give UTC
 
 async function renderMeetings(el) {
   // Check if current model supports audio
-  const audioWarning = (_modelState.capabilities && !_modelState.capabilities.audio && _modelState.status === 'ready')
+  const audioWarning = (_modelState.capabilities && _modelState.capabilities.audio === false && _modelState.status === 'ready')
     ? `<div class="summary-locked-notice" style="margin-bottom:16px">
         <div class="summary-locked-icon">🎙️</div>
         <div class="summary-locked-text">

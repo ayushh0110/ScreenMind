@@ -1,5 +1,6 @@
 """Model management routes — list, download, switch models via model_manager."""
 
+import asyncio
 import threading
 
 from fastapi import APIRouter, Request
@@ -9,6 +10,16 @@ from screenmind.config import settings
 from screenmind.engine import model_manager
 
 router = APIRouter(prefix="/api/models", tags=["models"])
+
+_EXTERNAL_ERROR = (
+    "llama-server is running outside ScreenMind. Stop it (or point "
+    "LLAMA_SERVER_HOST elsewhere) to let ScreenMind start and switch models."
+)
+
+
+async def _external_in_use() -> bool:
+    """Fresh check (off the event loop) — the server may have just stopped."""
+    return await asyncio.to_thread(model_manager.sync_external_server)
 
 
 @router.get("")
@@ -84,6 +95,8 @@ async def switch_model(request: Request):
             {"error": f"Lifecycle in progress: {dl_state['model']}"},
             status_code=409,
         )
+    if await _external_in_use():
+        return JSONResponse({"error": _EXTERNAL_ERROR}, status_code=409)
 
     # Run in background thread to avoid blocking (#1 pattern)
     threading.Thread(
@@ -101,6 +114,8 @@ async def restart_model_server():
     Force-restart the server with the current active model.
     Used by the Retry button — guarantees a real restart regardless of active key. (#5)
     """
+    if await _external_in_use():
+        return JSONResponse({"error": _EXTERNAL_ERROR}, status_code=409)
     threading.Thread(
         target=model_manager.restart_server,
         daemon=True,
@@ -137,7 +152,10 @@ async def set_variant(request: Request):
     settings.save_runtime_overrides({"model_variants": variants})
 
     # If this is the active model AND new variant is downloaded → restart
-    if model_manager.get_active_model() == key and model_manager.is_variant_downloaded(key, quant):
+    # (never an external server — the preference applies once we manage it)
+    if (model_manager.get_active_model() == key
+            and model_manager.is_variant_downloaded(key, quant)
+            and not model_manager.is_external_server()):
         threading.Thread(target=model_manager.restart_server, daemon=True).start()
 
     return JSONResponse({"status": "ok"})

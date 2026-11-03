@@ -22,6 +22,33 @@ from screenmind.platform_support import is_wayland
 logger = logging.getLogger("screenmind.capture.screen")
 
 
+def save_screenshot(img: Image.Image) -> Path:
+    """Save a frame as JPEG in the date-organized screenshots dir, then encrypt
+    it at rest if enabled. Raises on save failure."""
+    now = datetime.now()
+    date_dir = settings.screenshots_dir / now.strftime("%Y-%m-%d")
+    date_dir.mkdir(parents=True, exist_ok=True)
+
+    filename = f"{now.strftime('%H-%M-%S')}_{int(now.timestamp() * 1000) % 1000:03d}.jpg"
+    filepath = date_dir / filename
+
+    img.save(
+        str(filepath),
+        "JPEG",
+        quality=settings.screenshot_quality,
+        optimize=True,
+    )
+
+    # Encrypt at rest if enabled (no-op when encryption_enabled=False)
+    try:
+        from screenmind.privacy.encryption import encrypt_image
+        encrypt_image(filepath)
+    except Exception:
+        pass  # Never fail capture due to encryption
+
+    return filepath
+
+
 class ScreenCapture:
     """Handles screenshot capture, compression, and storage.
 
@@ -186,15 +213,18 @@ class ScreenCapture:
         """Key identifying the last captured monitor (e.g. '0,0'), or None."""
         return getattr(self, "_last_monitor_key", None)
 
-    def capture(self) -> Optional[Tuple[Path, Image.Image]]:
+    def grab(self) -> Optional[Image.Image]:
         """
-        Capture a screenshot and save as a compressed JPEG.
+        Grab the screen into memory. Nothing is written to disk.
+
+        Cheap enough to run on every change check — the capture worker
+        dedups the grabbed frame and only calls save() when it's new.
 
         Returns:
-            Tuple of (saved file path, PIL Image) or None if capture fails.
+            PIL Image, or None if capture fails.
         """
         if self._backend:
-            return self._backend.capture()
+            return self._backend.grab()
 
         if self._sct:
             try:
@@ -203,37 +233,40 @@ class ScreenCapture:
                 raw = self._sct.grab(monitor)
 
                 # Convert to PIL Image (mss returns BGRA, PIL expects RGB)
-                img = Image.frombytes("RGB", raw.size, raw.bgra, "raw", "BGRX")
-
-                # Save to date-organized directory
-                now = datetime.now()
-                date_dir = settings.screenshots_dir / now.strftime("%Y-%m-%d")
-                date_dir.mkdir(parents=True, exist_ok=True)
-
-                filename = f"{now.strftime('%H-%M-%S')}_{int(now.timestamp() * 1000) % 1000:03d}.jpg"
-                filepath = date_dir / filename
-
-                img.save(
-                    str(filepath),
-                    "JPEG",
-                    quality=settings.screenshot_quality,
-                    optimize=True,
-                )
-
-                # Encrypt at rest if enabled (no-op when encryption_enabled=False)
-                try:
-                    from screenmind.privacy.encryption import encrypt_image
-                    encrypt_image(filepath)
-                except Exception:
-                    pass  # Never fail capture due to encryption
-
-                return filepath, img
-
+                return Image.frombytes("RGB", raw.size, raw.bgra, "raw", "BGRX")
             except Exception as e:
                 logger.error(f"Error capturing screenshot: {e}")
                 return None
 
         return None  # both _backend and _sct are None (init failure)
+
+    def save(self, img: Image.Image) -> Optional[Path]:
+        """
+        Save a grabbed frame as a compressed JPEG (encrypted at rest if enabled).
+
+        Returns:
+            Saved file path, or None if saving fails.
+        """
+        try:
+            return save_screenshot(img)
+        except Exception as e:
+            logger.error(f"Error saving screenshot: {e}")
+            return None
+
+    def capture(self) -> Optional[Tuple[Path, Image.Image]]:
+        """
+        Capture a screenshot and save as a compressed JPEG.
+
+        Returns:
+            Tuple of (saved file path, PIL Image) or None if capture fails.
+        """
+        img = self.grab()
+        if img is None:
+            return None
+        filepath = self.save(img)
+        if filepath is None:
+            return None
+        return filepath, img
 
     def capture_to_bytes(self) -> Optional[Tuple[bytes, Image.Image]]:
         """

@@ -94,9 +94,9 @@ Four AI models working in concert:
 | Property | Detail |
 |---|---|
 | **Method** | `mss` (Windows, macOS, Linux X11); `grim` or the XDG Desktop Portal on Wayland |
-| **Smart polling** | Checks every 5s. Saves on a content change at most every 10s, and always after `capture_interval` (default 40s) |
-| **Deduplication** | Perceptual hash (pHash), Hamming distance ≤ 8 counts as unchanged |
-| **Idle detection** | After 3+ unchanged checks, only captures every `capture_interval` |
+| **Smart polling** | Wakes every 5s. Checks for a content change at most every 10s after a save; only changed frames are saved |
+| **Deduplication** | Perceptual hash (pHash) on the in-memory frame, Hamming distance ≤ 8 counts as unchanged. Nothing is written to disk for a duplicate |
+| **Idle detection** | After 3+ checks with nothing new (unchanged screen or failed grab), only checks every `capture_interval` (default 40s) — sooner on an app switch (right away) or a window-title change (after 10s) |
 | **A11y extraction** | Accessibility text read at capture time, so it comes from the right window |
 | **Privacy** | Blocked apps are skipped; heavy apps (games, editors) pause capture; incognito captures nothing |
 | **Output** | JPEG (quality 70) → `~/.screenmind/screenshots/YYYY-MM-DD/HH-MM-SS_mmm.jpg` |
@@ -106,13 +106,12 @@ Each saved capture is inserted into the database right away (status `pending`) s
 
 ```
 Capture Loop:
-┌──────────┐    ┌──────────┐    ┌──────────┐    ┌──────────────┐
-│ grab      │──▶│ pHash    │──▶│ A11y text│──▶│ DB insert +  │
-│ (5s poll) │   │ dedup    │   │ extract  │   │ queue        │
-│ (40s max) │   │          │   │          │   │              │
-└──────────┘    └──────────┘   └──────────┘   └──────────────┘
+┌──────────┐    ┌──────────┐    ┌──────────┐    ┌──────────┐    ┌──────────────┐
+│ grab      │──▶│ pHash    │──▶│ save JPEG│──▶│ A11y text│──▶│ DB insert +  │
+│ (memory)  │   │ dedup    │   │ (+encrypt)│  │ extract  │   │ queue        │
+└──────────┘    └──────────┘   └──────────┘   └──────────┘   └──────────────┘
                     │ duplicate?
-                    └──▶ skip + delete file
+                    └──▶ skip (nothing written)
 ```
 
 ### 3.2 Analysis Worker — Per-App pHash Cache (3 Tiers)

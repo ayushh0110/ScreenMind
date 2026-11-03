@@ -334,7 +334,7 @@ async function loadModels() {
       externalCard = `
         <div class="model-row" style="border:1px solid rgba(251,191,36,0.3);background:rgba(251,191,36,0.05);margin-bottom:8px">
           <div class="model-info">
-            <div class="model-name">\u26a0\ufe0f ${extModel}
+            <div class="model-name">\u26a0\ufe0f ${escapeHtml(extModel)}
               <span class="model-badge" style="background:rgba(251,191,36,0.2);color:#fbbf24">External</span>
             </div>
             <div class="model-meta" style="color:#fbbf24;font-size:0.75rem">Unknown model running on server — may lack vision or audio support</div>
@@ -361,6 +361,8 @@ async function loadModels() {
           vAction = '<button class="btn-sm" disabled style="opacity:0.4">Busy</button>';
         } else if (isThisActive) {
           vAction = '';
+        } else if (isThisDownloaded && _modelState.external) {
+          vAction = `<button class="btn-sm" disabled style="opacity:0.4" title="${_EXTERNAL_SWITCH_HINT}">Switch</button>`;
         } else if (isThisDownloaded) {
           vAction = `<button class="btn-sm btn-switch" onclick="settingsSwitchVariant('${m.key}', '${v.quant}')">Switch</button>`;
         } else {
@@ -443,25 +445,17 @@ window.settingsSwitchVariant = async function(key, quant) {
   if (!confirm('Switching requires a server restart. Continue?')) return;
   try {
     // Save variant preference
-    await fetch('/api/models/variant', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ key, quant }),
-    });
+    await _modelPost('/api/models/variant', { key, quant });
     // Switch to this model if it's a different model
     const activeModel = typeof _modelState !== 'undefined' ? _modelState.activeModel : null;
     if (activeModel !== key) {
-      await fetch('/api/models/switch', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ key }),
-      });
+      await _modelPost('/api/models/switch', { key });
     }
     showToast(`Switching to ${key} (${quant})...`, 'info');
-    loadModels();
   } catch (e) {
     showToast('Failed to switch: ' + e.message, 'warning');
   }
+  loadModels();
 };
 
 window.settingsDeleteVariant = async function(key, quant) {

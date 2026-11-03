@@ -535,3 +535,169 @@ class TestAvailableModelsConsistency:
         for m in model_manager.AVAILABLE_MODELS:
             assert "audio" in m, f"{m['key']} missing 'audio' flag"
             assert "vision" in m, f"{m['key']} missing 'vision' flag"
+
+
+# ── External llama-server (#27) ───────────────────────────────────────
+
+def _http(status, body=None):
+    r = MagicMock()
+    r.status_code = status
+    r.json.return_value = body or {}
+    return r
+
+
+def _fake_server(health=200, model_id="gemma-4-E2B-it-Q8_0.gguf", calls=None):
+    """httpx.get stand-in for an llama-server answering /health and /v1/models."""
+    def get(url, timeout=None):
+        if calls is not None:
+            calls.append(url)
+        if url.endswith("/health"):
+            if health is None:
+                raise ConnectionError("refused")
+            return _http(health)
+        if model_id is None:
+            raise ConnectionError("no /v1/models")
+        return _http(200, {"data": [{"id": model_id}]})
+    return get
+
+
+@pytest.fixture
+def external_state():
+    """Fresh external-server globals, no spawned process, idle lifecycle."""
+    names = ("_external_server", "_external_loading", "_external_model_name",
+             "_active_model_key", "_server_process")
+    saved = {n: getattr(model_manager, n) for n in names}
+    model_manager._external_server = False
+    model_manager._external_loading = False
+    model_manager._external_model_name = None
+    model_manager._active_model_key = None
+    model_manager._server_process = None
+    model_manager._set_download_state(active=False, status="idle", message="")
+    with patch("screenmind.engine.model_manager.settings") as mock_settings:
+        mock_settings.llama_server_host = "http://127.0.0.1:5809"
+        mock_settings.active_model = "gemma-4-e2b"
+        mock_settings.model_variants = {}
+        yield mock_settings
+    for n, v in saved.items():
+        setattr(model_manager, n, v)
+    model_manager._set_download_state(active=False, status="idle", message="")
+
+
+class TestExternalServer:
+    """An llama-server started outside ScreenMind is detected and used."""
+
+    def test_probes_llama_server_host_not_localhost(self, external_state):
+        external_state.llama_server_host = "http://10.0.0.5:8080/"
+        calls = []
+        with patch("httpx.get", side_effect=_fake_server(calls=calls)):
+            assert model_manager.sync_external_server() is True
+        assert calls == ["http://10.0.0.5:8080/health", "http://10.0.0.5:8080/v1/models"]
+        assert model_manager.get_active_model() == "gemma-4-e2b"
+        assert model_manager.is_server_running() is True
+
+    def test_known_model_is_ready(self, external_state):
+        with patch("httpx.get", side_effect=_fake_server()):
+            model_manager.sync_external_server()
+        status = model_manager.get_model_status()
+        assert status["status"] == "ready"
+        assert status["external"] is True
+        assert status["external_model"] is None
+        assert status["capabilities"] == {"audio": True, "vision": True}
+
+    def test_unknown_model_is_ready_with_unknown_capabilities(self, external_state):
+        with patch("httpx.get", side_effect=_fake_server(model_id="/models/llama-3-8b.gguf")):
+            model_manager.sync_external_server()
+        status = model_manager.get_model_status()
+        assert status["status"] == "ready"
+        assert status["external_model"] == "llama-3-8b.gguf"
+        assert status["capabilities"] == {"audio": None, "vision": None}
+
+    def test_unidentifiable_server_still_adopted(self, external_state):
+        """/health OK but /v1/models fails: use it as an unknown model."""
+        with patch("httpx.get", side_effect=_fake_server(model_id=None)):
+            assert model_manager.sync_external_server() is True
+        status = model_manager.get_model_status()
+        assert status["status"] == "ready"
+        assert status["external_model"] == "Unknown model"
+
+    def test_loading_server_is_starting_not_ready(self, external_state):
+        """503 while loading: not usable yet, but never spawn over its port."""
+        with patch("httpx.get", side_effect=_fake_server(health=503)):
+            assert model_manager.sync_external_server() is True
+        assert model_manager.is_server_running() is False
+        status = model_manager.get_model_status()
+        assert status["status"] == "starting"
+        assert status["external"] is True
+
+        with patch("httpx.get", side_effect=_fake_server(health=200)):
+            model_manager.sync_external_server()
+        assert model_manager.get_model_status()["status"] == "ready"
+
+    def test_no_server_is_not_adopted(self, external_state):
+        with patch("httpx.get", side_effect=_fake_server(health=None)):
+            assert model_manager.sync_external_server() is False
+        assert model_manager.is_server_running() is False
+
+    def test_server_going_away_is_dropped(self, external_state):
+        with patch("httpx.get", side_effect=_fake_server()):
+            model_manager.sync_external_server()
+        with patch("httpx.get", side_effect=_fake_server(health=None)):
+            assert model_manager.sync_external_server() is False
+        assert model_manager.is_server_running() is False
+        assert model_manager.get_active_model() is None
+
+    def test_model_swap_is_picked_up(self, external_state):
+        with patch("httpx.get", side_effect=_fake_server()):
+            model_manager.sync_external_server()
+        with patch("httpx.get", side_effect=_fake_server(model_id="gemma-4-E4B-it-Q4_0.gguf")):
+            model_manager.sync_external_server()
+        assert model_manager.get_active_model() == "gemma-4-e4b"
+
+    def test_status_checks_make_no_network_calls(self, external_state):
+        """/api/status is async and polled — it must never wait on the network."""
+        with patch("httpx.get", side_effect=_fake_server()):
+            model_manager.sync_external_server()
+        with patch("httpx.get", side_effect=AssertionError("network call")):
+            assert model_manager.is_server_running() is True
+            model_manager.get_model_status()
+            model_manager.list_models()
+
+    def test_not_probed_while_server_is_booting(self, external_state):
+        """start_server() holds the lock while our own server boots — never
+        wait on it, and never adopt our own half-started server."""
+        model_manager._server_lock.acquire()
+        try:
+            with patch("httpx.get", side_effect=AssertionError("network call")):
+                assert model_manager.sync_external_server() is False
+        finally:
+            model_manager._server_lock.release()
+
+    def test_not_probed_during_lifecycle(self, external_state):
+        model_manager._set_download_state(active=True, status="starting")
+        with patch("httpx.get", side_effect=AssertionError("network call")):
+            assert model_manager.sync_external_server() is False
+
+    def test_clears_sticky_error(self, external_state):
+        model_manager._set_download_state(active=False, status="error", message="Server failed to start.")
+        with patch("httpx.get", side_effect=_fake_server()):
+            model_manager.sync_external_server()
+        assert model_manager.get_model_status()["status"] == "ready"
+
+    def test_switch_and_restart_refused(self, external_state):
+        with patch("httpx.get", side_effect=_fake_server()):
+            model_manager.sync_external_server()
+        with patch.object(model_manager, "start_server") as start:
+            assert model_manager.switch_model("gemma-4-e4b") is False
+            assert model_manager.restart_server() is False
+        start.assert_not_called()
+
+    def test_download_does_not_start_server(self, external_state):
+        with patch("httpx.get", side_effect=_fake_server()):
+            model_manager.sync_external_server()
+        with patch.object(model_manager, "_check_model_disk_space", return_value=True), \
+             patch.object(model_manager, "_do_download", return_value=True), \
+             patch.object(model_manager, "start_server") as start:
+            assert model_manager.download_and_start("gemma-4-e4b") is True
+        start.assert_not_called()
+        assert model_manager.get_download_state()["active"] is False
+        assert model_manager.get_model_status()["status"] == "ready"

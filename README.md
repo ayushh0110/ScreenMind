@@ -538,7 +538,8 @@ Settings can be changed in the **Settings** dashboard (saved to `~/.screenmind/s
 | `CAPTURE_PAUSED` | `true` | Capture state, persisted across restarts |
 | `DATA_DIR` | `~/.screenmind` | Where all data is stored |
 | `API_PORT` | `7777` | Dashboard / API port |
-| `LLAMA_SERVER_PORT` | `5809` | llama-server port |
+| `LLAMA_SERVER_PORT` | `5809` | Port ScreenMind starts its own llama-server on |
+| `LLAMA_SERVER_HOST` | `http://127.0.0.1:5809` | llama-server URL ScreenMind talks to — point it at an external server (another port or machine) to use that one |
 | `SCREENMIND_LOG_LEVEL` | `INFO` | Log verbosity: `DEBUG`, `INFO`, `WARNING`, `ERROR` |
 | `SCREENMIND_LOG_FILE` | *(none)* | Path to a log file (rotating, 10MB × 3 backups) |
 
@@ -687,7 +688,7 @@ ScreenMind/
 | Scenario | Behavior |
 |----------|----------|
 | **llama-server not found** | Auto-downloads correct binary from GitHub releases (CUDA/CPU auto-detected). Checks disk space first. |
-| **External llama-server running** | Auto-detects and adopts. Known models show as active; unknown models show amber warning. |
+| **External llama-server running** | Auto-detects and adopts the server at `LLAMA_SERVER_HOST` — no local llama-server binary needed, and one started (or swapped to another model) after ScreenMind is picked up within ~10s. Known models show as active; unknown models show amber warning. ScreenMind won't start or switch its own server while it runs. |
 | **Model not downloaded** | Model Hub shows lock screen with download cards. Progress tracked in UI. Chat/Summary locked until ready. |
 | **GPU out of memory** | Detects OOM, retries with delay, re-queues on persistent failure. |
 | **Duplicate frames** | pHash dedup skips identical screenshots (threshold: 8 hamming distance). |

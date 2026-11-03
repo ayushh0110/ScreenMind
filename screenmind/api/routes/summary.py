@@ -84,8 +84,22 @@ async def get_summary(
     date: str = Query(default=None),
 ):
     target = date or str(__import__("datetime").date.today())
-    summary = db.get_daily_summary(target)
-    return {"date": target, "generated": summary is not None, "summary": summary, "standup": (summary or {}).get("standup", "")}
+    summary = db.get_daily_summary(target) or {}
+    return {
+        "date": target,
+        # A standup-only day has a row with an empty summary — not generated
+        "generated": bool(summary.get("summary")),
+        "summary": summary or None,
+        "standup": summary.get("standup") or "",
+        "summary_generated_at": summary.get("summary_generated_at"),
+        "standup_generated_at": summary.get("standup_generated_at"),
+    }
+
+
+@router.get("/summary/dates")
+async def list_summary_dates(limit: int = Query(default=14, ge=1, le=60)):
+    """Recent dates that have a summary and/or standup (for the date pills)."""
+    return {"dates": db.list_summary_dates(limit)}
 
 
 @router.post("/summary/generate")
@@ -199,12 +213,12 @@ Write the summary:"""
         productive_hours=metrics["productive_hours"],
         top_repos=metrics["top_repos"],
     )
-    db.upsert_daily_summary(summary_obj)
+    generated_at = db.upsert_daily_summary(summary_obj)
 
     # Fire integrations
     _fire_summary_integrations(target, summary_text, "", real_count)
 
-    return {"date": target, "summary": {"summary": summary_text}}
+    return {"date": target, "summary": {"summary": summary_text}, "generated_at": generated_at}
 
 
 @router.post("/standup/generate")
@@ -316,12 +330,12 @@ Activities:
         productive_hours=metrics["productive_hours"],
         top_repos=metrics["top_repos"],
     )
-    db.upsert_daily_summary(standup_summary, standup=standup)
+    generated_at = db.upsert_daily_summary(standup_summary, standup=standup)
 
     # Fire integrations
     _fire_summary_integrations(target, "", standup, real_count)
 
-    return {"date": target, "standup": standup}
+    return {"date": target, "standup": standup, "generated_at": generated_at}
 
 
 def _fire_summary_integrations(date_str: str, summary: str, standup: str, activity_count: int):

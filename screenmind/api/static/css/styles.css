@@ -395,6 +395,33 @@ mark {
 .search-date-pill.active { background: var(--accent); color: white; }
 .search-date-pill:active { transform: scale(0.95); }
 
+/* Segmented pills — same look as the search date pills, for reuse */
+.seg-pills {
+  display: inline-flex; border: 1px solid var(--border); border-radius: 20px;
+  overflow-x: auto; max-width: 100%; scrollbar-width: none;
+}
+.seg-pills::-webkit-scrollbar { display: none; }
+.seg-pill {
+  display: inline-flex; align-items: center; gap: 4px;
+  padding: 6px 14px; font-size: 0.78rem; font-weight: 500;
+  color: var(--text-muted); background: transparent; border: none;
+  border-right: 1px solid var(--border); cursor: pointer;
+  transition: all 0.25s cubic-bezier(0.34, 1.56, 0.64, 1);
+  white-space: nowrap;
+}
+.seg-pill:last-child { border-right: none; }
+.seg-pill:hover { background: rgba(255,255,255,0.04); color: var(--text-primary); }
+.seg-pill.active { background: var(--accent); color: white; }
+.seg-pill:active { transform: scale(0.95); }
+.seg-pill-dot { width: 5px; height: 5px; border-radius: 50%; flex-shrink: 0; }
+.seg-pill-dot.dot-summary { background: #a78bfa; }
+.seg-pill-dot.dot-standup { background: #10b981; }
+.seg-pill.active .seg-pill-dot { background: white; }
+
+/* Summary page */
+.summary-toolbar { display: flex; align-items: center; flex-wrap: wrap; gap: 12px; margin-bottom: 24px; }
+.summary-meta { font-size: 0.75rem; color: var(--text-muted); margin: -8px 0 12px; }
+
 /* Custom date range row */
 .search-date-range {
   display: flex; align-items: center; gap: 8px;

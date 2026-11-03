@@ -167,7 +167,9 @@ class Database:
                 category_breakdown  TEXT,
                 top_repos           TEXT,
                 productive_hours    REAL DEFAULT 0.0,
-                created_at          DATETIME DEFAULT CURRENT_TIMESTAMP
+                created_at          DATETIME DEFAULT CURRENT_TIMESTAMP,
+                summary_generated_at TEXT,
+                standup_generated_at TEXT
             );
 
             -- Indexes for fast queries
@@ -234,6 +236,14 @@ class Database:
                     ELSE 'pending'
                 END WHERE status = 'pending'""",
                 "CREATE INDEX IF NOT EXISTS idx_activities_status ON activities(status)",
+            ],
+            # v8: when the summary and the standup were each last generated
+            # (local time) — created_at is UTC and never updated on regenerate.
+            # standup used to be added on first upsert; add it here too.
+            [
+                "ALTER TABLE daily_summaries ADD COLUMN standup TEXT",
+                "ALTER TABLE daily_summaries ADD COLUMN summary_generated_at TEXT",
+                "ALTER TABLE daily_summaries ADD COLUMN standup_generated_at TEXT",
             ],
         ]
 
@@ -604,25 +614,29 @@ class Database:
 
     # ── Daily Summary ────────────────────────────────────────────────────
 
-    def upsert_daily_summary(self, summary: DailySummary, standup: str = ""):
-        """Insert or update a daily summary."""
+    def upsert_daily_summary(self, summary: DailySummary, standup: str = "") -> str:
+        """Insert or update a daily summary.
+
+        Empty summary/standup text keeps the stored one (and its generation
+        time). Returns the local-time generation timestamp recorded for the
+        non-empty part(s).
+        """
         conn = self._get_conn()
-        # Migrate: add standup column if missing
-        try:
-            conn.execute("ALTER TABLE daily_summaries ADD COLUMN standup TEXT")
-        except Exception:
-            logger.debug("standup column already exists")
+        now = datetime.now().isoformat(timespec="seconds")
         conn.execute(
             """
-            INSERT INTO daily_summaries (date, summary, standup, total_activities, category_breakdown, top_repos, productive_hours)
-            VALUES (?, ?, ?, ?, ?, ?, ?)
+            INSERT INTO daily_summaries (date, summary, standup, total_activities, category_breakdown,
+                                         top_repos, productive_hours, summary_generated_at, standup_generated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(date) DO UPDATE SET
                 summary = COALESCE(NULLIF(excluded.summary, ''), daily_summaries.summary),
                 standup = COALESCE(NULLIF(excluded.standup, ''), daily_summaries.standup),
                 total_activities = excluded.total_activities,
                 category_breakdown = excluded.category_breakdown,
                 top_repos = excluded.top_repos,
-                productive_hours = excluded.productive_hours
+                productive_hours = excluded.productive_hours,
+                summary_generated_at = COALESCE(excluded.summary_generated_at, daily_summaries.summary_generated_at),
+                standup_generated_at = COALESCE(excluded.standup_generated_at, daily_summaries.standup_generated_at)
             """,
             (
                 summary.date,
@@ -632,9 +646,12 @@ class Database:
                 json.dumps(summary.category_breakdown),
                 json.dumps(summary.top_repos),
                 summary.productive_hours,
+                now if summary.summary else None,
+                now if standup else None,
             ),
         )
         conn.commit()
+        return now
 
     def get_daily_summary(self, target_date: str) -> Optional[Dict[str, Any]]:
         """Get daily summary for a date."""
@@ -650,6 +667,25 @@ class Database:
             result["top_repos"] = json.loads(result.get("top_repos") or "[]")
             return result
         return None
+
+    def list_summary_dates(self, limit: int = 14) -> List[Dict[str, Any]]:
+        """Most recent dates with a generated summary and/or standup."""
+        rows = self._get_conn().execute(
+            """
+            SELECT date,
+                   COALESCE(summary, '') != '' AS has_summary,
+                   COALESCE(standup, '') != '' AS has_standup
+            FROM daily_summaries
+            WHERE COALESCE(summary, '') != '' OR COALESCE(standup, '') != ''
+            ORDER BY date DESC
+            LIMIT ?
+            """,
+            (limit,),
+        ).fetchall()
+        return [
+            {"date": r["date"], "summary": bool(r["has_summary"]), "standup": bool(r["has_standup"])}
+            for r in rows
+        ]
 
     # ── Cleanup ──────────────────────────────────────────────────────────
 

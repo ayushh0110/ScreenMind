@@ -6,7 +6,7 @@ async function renderMemos(el) {
   var memosDate = currentDate;
 
   // Check if current model supports audio
-  const memoAudioWarning = (_modelState.capabilities && !_modelState.capabilities.audio && _modelState.status === 'ready')
+  const memoAudioWarning = (_modelState.capabilities && _modelState.capabilities.audio === false && _modelState.status === 'ready')
     ? `<div class="summary-locked-notice" style="margin-bottom:16px">
         <div class="summary-locked-icon">🎤</div>
         <div class="summary-locked-text">

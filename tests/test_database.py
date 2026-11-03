@@ -118,6 +118,51 @@ def test_upsert_daily_summary(db):
     assert result["summary"] == "Updated summary"
 
 
+def test_summary_and_standup_generation_times_are_separate(db):
+    """Each part keeps its own (local) generation time; regenerating one
+    leaves the other's text and time alone (#29)."""
+    from unittest.mock import patch
+
+    def at(ts):
+        mock_dt = patch("screenmind.storage.database.datetime")
+        m = mock_dt.start()
+        m.now.return_value = datetime.fromisoformat(ts)
+        return mock_dt
+
+    p = at("2026-05-16T09:00:00")
+    db.upsert_daily_summary(DailySummary(date="2026-05-16", summary="Morning summary"))
+    p.stop()
+    p = at("2026-05-16T12:00:00")
+    returned = db.upsert_daily_summary(DailySummary(date="2026-05-16", summary=""), standup="Standup")
+    p.stop()
+    assert returned == "2026-05-16T12:00:00"
+
+    row = db.get_daily_summary("2026-05-16")
+    assert row["summary"] == "Morning summary"
+    assert row["summary_generated_at"] == "2026-05-16T09:00:00"
+    assert row["standup_generated_at"] == "2026-05-16T12:00:00"
+
+    p = at("2026-05-16T19:00:00")
+    db.upsert_daily_summary(DailySummary(date="2026-05-16", summary="Evening summary"))
+    p.stop()
+    row = db.get_daily_summary("2026-05-16")
+    assert row["summary"] == "Evening summary"
+    assert row["summary_generated_at"] == "2026-05-16T19:00:00"
+    assert row["standup"] == "Standup"
+    assert row["standup_generated_at"] == "2026-05-16T12:00:00"
+
+
+def test_list_summary_dates(db):
+    db.upsert_daily_summary(DailySummary(date="2026-05-14", summary="A"))
+    db.upsert_daily_summary(DailySummary(date="2026-05-15", summary=""), standup="S")
+    db.upsert_daily_summary(DailySummary(date="2026-05-16", summary="B"), standup="S")
+    dates = db.list_summary_dates(limit=2)
+    assert dates == [
+        {"date": "2026-05-16", "summary": True, "standup": True},
+        {"date": "2026-05-15", "summary": False, "standup": True},
+    ]
+
+
 def test_delete_by_date(db):
     for i in range(5):
         entry = ScreenshotEntry(

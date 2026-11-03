@@ -117,6 +117,45 @@ async def test_summary_not_generated(client):
 
 
 @pytest.mark.asyncio
+async def test_summary_standup_only_day_is_not_generated(client, db):
+    """A standup-only day has an empty summary — the card must say so (#29)."""
+    from screenmind.storage.models import DailySummary
+    db.upsert_daily_summary(DailySummary(date="2026-05-16", summary=""), standup="- Did things")
+    data = (await client.get("/api/summary?date=2026-05-16")).json()
+    assert data["generated"] is False
+    assert data["standup"] == "- Did things"
+    assert data["standup_generated_at"]
+    assert data["summary_generated_at"] is None
+
+
+@pytest.mark.asyncio
+async def test_summary_dates(client, db):
+    from screenmind.storage.models import DailySummary
+    db.upsert_daily_summary(DailySummary(date="2026-05-16", summary="Day"))
+    data = (await client.get("/api/summary/dates")).json()
+    assert data["dates"] == [{"date": "2026-05-16", "summary": True, "standup": False}]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("path,body", [
+    ("/api/models/switch", {"key": "gemma-4-e4b"}),
+    ("/api/models/restart", None),
+])
+async def test_model_lifecycle_refused_with_external_server(client, path, body):
+    """Starting our own llama-server would collide with the external one (#27)."""
+    from unittest.mock import patch
+    from screenmind.engine import model_manager
+    with patch.object(model_manager, "sync_external_server", return_value=True), \
+         patch.object(model_manager, "switch_model") as switch, \
+         patch.object(model_manager, "restart_server") as restart:
+        resp = await client.post(path, json=body)
+    assert resp.status_code == 409
+    assert "outside ScreenMind" in resp.json()["error"]
+    switch.assert_not_called()
+    restart.assert_not_called()
+
+
+@pytest.mark.asyncio
 async def test_auth_status_no_pin(client):
     resp = await client.get("/api/auth/status")
     assert resp.status_code == 200

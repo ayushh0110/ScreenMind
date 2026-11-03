@@ -5,6 +5,8 @@ from datetime import datetime
 from pathlib import Path
 from unittest.mock import MagicMock, patch, AsyncMock
 
+from PIL import Image
+
 from screenmind.workers.capture_worker import CaptureWorker, CaptureResult
 
 
@@ -307,3 +309,141 @@ class TestCaptureWorkerIncognito:
             await worker.run()
         title.assert_not_called()
         worker._audio_worker.check_meeting.assert_called_once_with("Zoom", None)
+
+
+class TestCaptureThrottle:
+    """Idle throttling and dedup-before-save (#26)."""
+
+    @pytest.fixture
+    def worker(self, tmp_path):
+        with patch("screenmind.config.Settings.save_runtime_overrides"):
+            w = CaptureWorker(queue=asyncio.Queue(maxsize=1000))
+        w._paused = False
+        w._screen = MagicMock()
+        w._screen.grab.return_value = Image.new("RGB", (64, 64), color=(90, 90, 90))
+        w._screen.save.return_value = tmp_path / "shot.jpg"
+        w._screen.last_monitor_key = None
+        w._a11y = MagicMock(is_available=False)
+        return w
+
+    @pytest.fixture
+    def env(self):
+        """Fake clock + settings + a fixed active window."""
+        clock = {"now": 1_000_000.0}
+        window = {"app": "Code", "title": "main.py"}
+        mock_settings = MagicMock(
+            capture_interval=40, blocked_apps_list=[], heavy_apps_list=[],
+            auto_pause_heavy_apps=False,
+        )
+        # Replace only the worker's `time` — asyncio itself uses time.monotonic
+        mock_time = MagicMock()
+        mock_time.monotonic.side_effect = lambda: clock["now"]
+        with patch("screenmind.workers.capture_worker.time", mock_time), \
+             patch("screenmind.workers.capture_worker.settings", mock_settings), \
+             patch("screenmind.workers.capture_worker.get_active_app_name", side_effect=lambda: window["app"]), \
+             patch("screenmind.workers.capture_worker.get_active_window_title", side_effect=lambda: window["title"]), \
+             patch("screenmind.integrations.smart_notify.check"):
+            yield clock, window
+
+    async def _run_for(self, worker, clock, seconds):
+        end = clock["now"] + seconds
+        worker._running = True
+
+        async def fake_sleep(delay):
+            clock["now"] += delay
+            if clock["now"] >= end:
+                worker._running = False
+
+        with patch("screenmind.workers.capture_worker.asyncio.sleep", side_effect=fake_sleep):
+            await worker.run()
+
+    async def test_static_screen_backs_off_to_capture_interval(self, worker, env):
+        clock, _ = env
+        await self._run_for(worker, clock, 600)
+        # 1 save + 3 change checks, then one check per 40s ≈ 18 grabs.
+        # Before the fix this was a grab every 5s (~115).
+        assert worker._screen.grab.call_count <= 20
+        assert worker._screen.save.call_count == 1
+
+    async def test_duplicate_frame_writes_nothing(self, worker, env):
+        await worker._capture_tick()
+        await worker._capture_tick()
+        assert worker._screen.grab.call_count == 2
+        worker._screen.save.assert_called_once()
+        assert worker._skip_count == 1
+
+    async def test_failed_grabs_back_off(self, worker, env):
+        clock, _ = env
+        worker._screen.grab.return_value = None
+        await self._run_for(worker, clock, 600)
+        assert worker._consecutive_skips >= 3
+        assert worker._screen.grab.call_count <= 20
+        worker._screen.save.assert_not_called()
+
+    async def test_window_change_wakes_idle_check(self, worker, env):
+        clock, window = env
+        await worker._capture_tick()  # records the current window
+        worker._consecutive_skips = 3  # idle
+        grabs = worker._screen.grab.call_count
+
+        await self._run_for(worker, clock, 5)  # well under capture_interval
+        assert worker._screen.grab.call_count == grabs
+
+        window["app"], window["title"] = "Chrome", "Docs"
+        await self._run_for(worker, clock, 5)
+        assert worker._screen.grab.call_count == grabs + 1
+
+    async def test_blocked_app_does_not_recheck_every_poll(self, worker, env):
+        """A blocked app stops the check before it records the window — the
+        switch to it must still wake only one check, not one every 5s."""
+        clock, window = env
+        await worker._capture_tick()
+        worker._consecutive_skips = 3  # idle
+        window["app"], window["title"] = "1Password", "Vault"
+        tick = AsyncMock(side_effect=worker._capture_tick)
+        worker._capture_tick = tick
+
+        with patch("screenmind.workers.capture_worker.settings.blocked_apps_list", ["1password"]):
+            await self._run_for(worker, clock, 30)  # under capture_interval
+        assert tick.await_count == 1
+
+    async def test_quick_stop_start_captures_right_away(self, worker, env):
+        """Stop then Start Capturing while idle must not wait out the idle
+        interval since the last check before capturing again."""
+        clock, _ = env
+        await worker._capture_tick()
+        clock["now"] += 60  # last save a minute ago, screen unchanged since
+        await worker._capture_tick()
+        worker._consecutive_skips = 3  # idle; a check just happened
+        with patch("screenmind.config.Settings.save_runtime_overrides"):
+            worker.pause(source="test")
+            worker.resume(source="test")
+        grabs = worker._screen.grab.call_count
+
+        await self._run_for(worker, clock, 5)  # first poll after resuming
+        assert worker._screen.grab.call_count == grabs + 1
+
+    async def test_ticking_title_waits_for_cooldown(self, worker, env):
+        """A title that changes every second (timer, unread count) in the same
+        app wakes a check at most every CHANGE_COOLDOWN, not every 5s poll."""
+        clock, window = env
+        await worker._capture_tick()
+        worker._consecutive_skips = 3  # idle
+        grabs = worker._screen.grab.call_count
+
+        async def run_with_ticking_title(seconds):
+            end = clock["now"] + seconds
+            worker._running = True
+
+            async def fake_sleep(delay):
+                clock["now"] += delay
+                window["title"] = f"main.py — {clock['now']:.1f}"
+                if clock["now"] >= end:
+                    worker._running = False
+
+            with patch("screenmind.workers.capture_worker.asyncio.sleep", side_effect=fake_sleep):
+                await worker.run()
+
+        await run_with_ticking_title(35)  # under capture_interval
+        # A check every 10s (3) — not one every 5s poll (7)
+        assert worker._screen.grab.call_count - grabs == 3

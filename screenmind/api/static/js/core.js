@@ -51,6 +51,13 @@ function bindDateNav(input, prevBtn, nextBtn, onChange) {
   return sync;
 }
 
+// Escape text for interpolation into innerHTML (model output, server names…)
+function escapeHtml(text) {
+  return String(text ?? '').replace(/[&<>"']/g, c => (
+    { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]
+  ));
+}
+
 let currentDate = localToday();
 let currentView = 'timeline';
 
@@ -370,6 +377,7 @@ function navigate(view) {
         const chatInput = document.getElementById('chat-input');
         if (chatInput) chatInput.focus();
       }
+      if (view === 'summary') refreshSummaryView();
     }
   } else {
     if (!ephemeral) {
@@ -420,6 +428,7 @@ async function pollStatus() {
       _modelState.download = s.model.download;
       _modelState.message = s.model.message || '';
       _modelState.externalModel = s.model.external_model || null;
+      _modelState.external = !!s.model.external;
       if (s.model.capabilities) _modelState.capabilities = s.model.capabilities;
 
       if (prev !== 'ready' && _modelState.status === 'ready') {
@@ -473,7 +482,24 @@ const _modelState = {
   message: '',
   models: [],
   capabilities: null,  // null until first poll — prevents false audio warnings
+  external: false,     // llama-server was started outside ScreenMind
 };
+
+const _EXTERNAL_SWITCH_HINT = 'llama-server is running outside ScreenMind — stop it to switch models here';
+
+// POST to a model lifecycle endpoint; throws with the server's error message
+async function _modelPost(url, body) {
+  const res = await fetch(url, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body || {}),
+  });
+  if (!res.ok) {
+    const j = await res.json().catch(() => ({}));
+    throw new Error(j.error || `HTTP ${res.status}`);
+  }
+  return res;
+}
 
 // Adaptive poll interval — faster during active lifecycle
 let _pollIntervalId = null;
@@ -533,7 +559,7 @@ async function _renderModelHubCards() {
       <div class="mh-card" style="border:1px solid rgba(251,191,36,0.4);background:rgba(251,191,36,0.06);animation-delay:0s">
         <div class="mh-card-top">
           <div class="mh-card-info">
-            <div class="mh-card-name">\u26a0\ufe0f ${_modelState.externalModel}
+            <div class="mh-card-name">\u26a0\ufe0f ${escapeHtml(_modelState.externalModel)}
               <span class="mh-badge" style="background:rgba(251,191,36,0.2);color:#fbbf24">External</span>
             </div>
             <div class="mh-card-meta" style="color:#fbbf24">Unknown model — may lack vision or audio support. Voice memos and screen analysis may not work correctly.</div>
@@ -567,6 +593,8 @@ async function _renderModelHubCards() {
         vAction = '<button class="mh-action-btn" disabled>Busy</button>';
       } else if (isThisActive) {
         vAction = '';  // No action for active variant
+      } else if (isThisDownloaded && _modelState.external) {
+        vAction = `<button class="mh-action-btn" disabled title="${_EXTERNAL_SWITCH_HINT}">Switch</button>`;
       } else if (isThisDownloaded) {
         vAction = `<button class="mh-action-btn mh-btn-switch" onclick="hubSwitchVariant('${m.key}', '${v.quant}')">Switch</button>`;
       } else {
@@ -662,16 +690,16 @@ function _updateModelHubFooter() {
   if (st.status === 'ready') {
     if (st.externalModel) {
       dot.className = 'mh-footer-dot mh-dot-starting';
-      text.innerHTML = 'Running \u00b7 ' + st.externalModel + ' (external)';
+      text.innerHTML = 'Running \u00b7 ' + escapeHtml(st.externalModel) + ' (external)';
     } else {
       const info = st.models.find(m => m.key === st.activeModel);
       const name = info ? info.name : (st.activeModel || 'Unknown');
       dot.className = 'mh-footer-dot mh-dot-ready';
-      text.innerHTML = 'Running \u00b7 ' + name + ' loaded';
+      text.innerHTML = 'Running \u00b7 ' + escapeHtml(name) + (st.external ? ' (external)' : ' loaded');
     }
   } else if (st.status === 'starting') {
     dot.className = 'mh-footer-dot mh-dot-starting';
-    text.innerHTML = 'Starting server...';
+    text.innerHTML = st.external ? 'External server loading a model...' : 'Starting server...';
   } else if (st.status === 'error') {
     dot.className = 'mh-footer-dot mh-dot-error';
     text.innerHTML = 'Server stopped \u00b7 <a onclick="retryModelStart()">Retry</a>';
@@ -728,24 +756,16 @@ window.hubSwitchVariant = async function(key, quant) {
   if (!confirm('Switching requires a server restart. Continue?')) return;
   // Save variant preference then switch model
   try {
-    await fetch('/api/models/variant', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ key, quant }),
-    });
+    await _modelPost('/api/models/variant', { key, quant });
     // If it's a different model, switch to it; if same model, variant endpoint already restarts
     if (_modelState.activeModel !== key) {
-      await fetch('/api/models/switch', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ key }),
-      });
+      await _modelPost('/api/models/switch', { key });
     }
     showToast(`Switching to ${key} (${quant})...`, 'info');
-    await _renderModelHubCards();
   } catch (e) {
     showToast('Failed to switch: ' + e.message, 'warning');
   }
+  await _renderModelHubCards();
 };
 
 window.hubDeleteVariant = async function(key, quant) {
@@ -784,7 +804,8 @@ function _confirmAudioLoss(key) {
 
 window.retryModelStart = async function() {
   showToast('Retrying server start...', 'info');
-  try { await fetch('/api/models/restart', { method: 'POST' }); } catch (e) { showToast('Retry failed: ' + e.message, 'warning'); }
+  try { await _modelPost('/api/models/restart'); } catch (e) { showToast('Retry failed: ' + e.message, 'warning'); }
+  pollStatus();
 };
 
 window.hubCancelDownload = async function() {
@@ -860,6 +881,7 @@ function _updateTimelinePill() {
 // ── Unified Model UI Dispatcher ───────────────────────────
 function _updateModelUI() {
   if (typeof _updateChatLockState === 'function') _updateChatLockState();
+  if (typeof syncSummaryModelLock === 'function') syncSummaryModelLock();
   _updateModelHubOverlay();
   _updateTimelinePill();
 
